@@ -839,7 +839,16 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 })
 
 client.on('messageCreate', msg => {
-  if (msg.author.bot) return
+  if (msg.author.bot) {
+    // Allow bot messages only if the sender is explicitly trusted in allowFrom.
+    // This enables fleet bots (e.g. Ohm, Vec) to doorbell via watched channels.
+    const access = loadAccess()
+    const botId = msg.author.id
+    const inTopLevel = access.allowFrom.includes(botId)
+    const channelKey = msg.channel.isThread() ? (msg.channel.parentId ?? msg.channelId) : msg.channelId
+    const inGroup = access.groups[channelKey]?.allowFrom?.includes(botId) ?? false
+    if (!inTopLevel && !inGroup) return
+  }
   handleInbound(msg).catch(e => process.stderr.write(`artifice-discord: handleInbound failed: ${e}\n`))
 })
 
