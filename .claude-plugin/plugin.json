@@ -2,6 +2,9 @@
   "name": "artifice-discord",
   "description": "Two-way Discord channel for Claude Code \u2014 forked from the official plugin, owns the full inbound+outbound pipe, with live tool-usage streaming. Powers the Artifice fleet. Access via /artifice-discord:access.",
   "version": "0.1.0",
+  "author": {
+    "name": "Fernando Baz"
+  },
   "keywords": [
     "discord",
     "messaging",

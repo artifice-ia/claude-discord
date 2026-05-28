@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "artifice-discord",
+  "description": "Artifice fleet Discord channel for Claude Code.",
+  "owner": {
+    "name": "Fernando Baz"
+  },
+  "plugins": [
+    {
+      "name": "artifice-discord",
+      "description": "Two-way Discord channel for Claude Code — forked from the official plugin, owns the full inbound+outbound pipe, with live tool-usage streaming. Powers the Artifice fleet.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
