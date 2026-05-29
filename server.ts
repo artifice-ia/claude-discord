@@ -799,6 +799,14 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       }
       try {
         execSync(`tmux send-keys -t "${session}" '/model ${modelId}' Enter`, { timeout: 5000 })
+        // Wait for TUI to render potential "Switch model?" confirmation prompt, then auto-confirm
+        await new Promise(r => setTimeout(r, 300))
+        try {
+          const pane = execSync(`tmux capture-pane -t "${session}" -p`, { timeout: 3000 }).toString()
+          if (pane.includes('Switch model?')) {
+            execSync(`tmux send-keys -t "${session}" '1' Enter`, { timeout: 3000 })
+          }
+        } catch {}
         await interaction.reply({ content: `✓ Switching to \`${modelId}\`...` }).catch(e => {
           process.stderr.write(`artifice-discord: /model reply failed: ${e}\n`)
         })
