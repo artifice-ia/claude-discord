@@ -785,24 +785,25 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         await interaction.editReply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {})
       }
     } else if (interaction.commandName === 'model') {
-      await interaction.deferReply().catch(() => {})
       const session = readPersonaName()
       if (!session) {
-        await interaction.editReply('❌ Could not determine session name — check persona.md.').catch(() => {})
+        await interaction.reply({ content: '❌ Could not determine session name — check persona.md.', ephemeral: true }).catch(() => {})
         return
       }
       const arg = (interaction.options.getString('model') ?? '').toLowerCase()
       const modelId = MODEL_MAP[arg]
       if (!modelId) {
         const valid = Object.keys(MODEL_MAP).join(', ')
-        await interaction.editReply(`❌ Unknown model \`${arg || '(none)'}\`. Valid: ${valid}`).catch(() => {})
+        await interaction.reply({ content: `❌ Unknown model \`${arg || '(none)'}\`. Valid: ${valid}`, ephemeral: true }).catch(() => {})
         return
       }
       try {
         execSync(`tmux send-keys -t "${session}" '/model ${modelId}' Enter`, { timeout: 5000 })
-        await interaction.editReply(`✓ Switching to \`${modelId}\`...`).catch(() => {})
+        await interaction.reply({ content: `✓ Switching to \`${modelId}\`...` }).catch(e => {
+          process.stderr.write(`artifice-discord: /model reply failed: ${e}\n`)
+        })
       } catch (err) {
-        await interaction.editReply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {})
+        await interaction.reply({ content: `❌ Failed: ${err instanceof Error ? err.message : String(err)}`, ephemeral: true }).catch(() => {})
       }
     }
     return
