@@ -55,22 +55,28 @@ process.stdin.on('end', async () => {
   try { payload = JSON.parse(raw) } catch { process.exit(0) }
 
   const { session_id, transcript_path, tool_name, tool_input } = payload
-  if (tool_name !== REPLY_TOOL) process.exit(0)
+  if (!transcript_path || !session_id) process.exit(0)
 
+  const isReplyTool = tool_name === REPLY_TOOL
   const channel = tool_input && tool_input.chat_id
   const replyText = (tool_input && tool_input.text) || ''
-  if (!channel || !transcript_path || !session_id) process.exit(0)
 
   let persona = {}
   try { persona = readFrontmatter(require('fs').readFileSync(personaPath, 'utf8')) } catch {}
   const personaChannel = persona.discord_channel || ''
 
-  // Extract message ID from tool response (array of text blocks or plain string)
-  const toolResp = payload.tool_response ?? payload.tool_result ?? ''
-  const respStr = typeof toolResp === 'string' ? toolResp : JSON.stringify(toolResp)
-  const msgIdMatch = respStr.match(/id[:\s"]+(\d{17,20})/)
-  const messageId = msgIdMatch && msgIdMatch[1]
-  if (!messageId) process.exit(0)
+  // For the reply tool, we need the message ID to edit-in the preamble.
+  let messageId = null
+  if (isReplyTool) {
+    const toolResp = payload.tool_response ?? payload.tool_result ?? ''
+    const respStr = typeof toolResp === 'string' ? toolResp : JSON.stringify(toolResp)
+    const msgIdMatch = respStr.match(/id[:\s"]+(\d{17,20})/)
+    messageId = msgIdMatch && msgIdMatch[1]
+    if (!messageId || !channel) process.exit(0)
+  } else {
+    // Non-reply tools: send preamble to persona channel if there is one.
+    if (!personaChannel) process.exit(0)
+  }
 
   // Per-session state — tracks which transcript entries have been prepended
   // so multiple reply calls in one turn don't double-forward.
@@ -96,20 +102,23 @@ process.stdin.on('end', async () => {
   }
   if (turnStart === -1) process.exit(0)
 
-  // Find the reply tool_use entry we just fired (most recent after turnStart).
-  let replyIndex = -1
-  for (let i = entries.length - 1; i > turnStart; i--) {
-    const e = entries[i]
-    const content = e.message && e.message.content
-    if (e.type === 'assistant' && hasReplyCall(content)) { replyIndex = i; break }
+  // For reply tool: only collect text entries that appeared BEFORE the reply call.
+  // For other tools: collect all new text entries up to now.
+  let upperBound = entries.length
+  if (isReplyTool) {
+    let replyIndex = -1
+    for (let i = entries.length - 1; i > turnStart; i--) {
+      const e = entries[i]
+      const content = e.message && e.message.content
+      if (e.type === 'assistant' && hasReplyCall(content)) { replyIndex = i; break }
+    }
+    if (replyIndex === -1) process.exit(0)
+    upperBound = replyIndex
   }
-  if (replyIndex === -1) process.exit(0)
 
-  // Collect text entries that appeared before this reply call and haven't
-  // been forwarded yet. Transcript indices are monotonically increasing so
-  // forwarded_up_to from a previous turn or reply can't shadow current entries.
+  // Collect text entries that haven't been forwarded yet.
   const toForward = []
-  for (let i = turnStart + 1; i < replyIndex; i++) {
+  for (let i = turnStart + 1; i < upperBound; i++) {
     if (i <= state.forwarded_up_to) continue
     const e = entries[i]
     if (e.type !== 'assistant') continue
@@ -128,23 +137,23 @@ process.stdin.on('end', async () => {
   state.forwarded_up_to = maxIndex
   try { writeFileSync(stateFile, JSON.stringify(state)) } catch {}
 
-  const preamble = toForward.map(x => x.text).join('\n\n')
+  const preamble = '_' + toForward.map(x => x.text).join('\n\n') + '_'
 
   const isFernandoChannel = personaChannel && channel === personaChannel
 
   await new Promise(resolve => {
     let body, path, method
 
-    if (isFernandoChannel) {
-      // Patch reply message to prepend preamble — one message, correct order.
+    if (isReplyTool && isFernandoChannel) {
+      // Patch reply message to prepend preamble — one message, preamble on top.
       const newContent = `${preamble}\n\n---\n\n${replyText}`
       const editContent = newContent.length > 2000 ? newContent.slice(0, 1997) + '...' : newContent
       body = JSON.stringify({ content: editContent })
       path = `/api/v10/channels/${channel}/messages/${messageId}`
       method = 'PATCH'
     } else {
-      // Reply went to a fleet/other channel — send preamble as a new message to
-      // Fernando's persona channel so it doesn't silently vanish.
+      // Non-reply tool or fleet channel: send preamble as a standalone italic message
+      // to persona channel so it appears immediately when the tool fires.
       const sendContent = preamble.length > 2000 ? preamble.slice(0, 1997) + '...' : preamble
       if (!personaChannel) { resolve(); return }
       body = JSON.stringify({ content: sendContent })

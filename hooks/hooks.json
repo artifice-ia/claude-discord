@@ -20,7 +20,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__plugin_artifice-discord_artifice-discord__reply",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
