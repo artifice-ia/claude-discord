@@ -33,16 +33,27 @@ let token = ''
 try { token = readFileSync(tokenFile, 'utf8').trim() } catch {}
 if (!token) process.exit(0)
 
-const req = request({
-  hostname: 'discord.com',
-  path: `/api/v10/channels/${channel}/typing`,
-  method: 'POST',
-  headers: {
-    'Authorization': `Bot ${token}`,
-    'Content-Length': '0',
-  }
-})
-req.on('error', () => {})
-req.end()
+// Spawn a detached background process to send typing indicators every 9s for 30s.
+// The parent exits immediately (hook timeout is 3s); the child runs independently.
+const { spawn } = require('child_process')
 
-setTimeout(() => process.exit(0), 100)
+const child = spawn(process.execPath, ['-e', `
+const { request } = require('https')
+function sendTyping() {
+  const req = request({
+    hostname: 'discord.com',
+    path: '/api/v10/channels/${channel}/typing',
+    method: 'POST',
+    headers: { 'Authorization': 'Bot ${token}', 'Content-Length': '0' }
+  })
+  req.on('error', () => {})
+  req.end()
+}
+sendTyping()
+setTimeout(sendTyping, 9000)
+setTimeout(sendTyping, 18000)
+setTimeout(() => process.exit(0), 27000)
+`], { detached: true, stdio: 'ignore' })
+child.unref()
+
+process.exit(0)

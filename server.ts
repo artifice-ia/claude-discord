@@ -902,6 +902,20 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       } catch (err) {
         await interaction.reply({ content: `❌ Failed: ${err instanceof Error ? err.message : String(err)}`, ephemeral: true }).catch(() => {})
       }
+    } else if (interaction.commandName === 'loop' || interaction.commandName === 'goal') {
+      const session = readPersonaName()
+      if (!session) {
+        await interaction.reply({ content: '❌ Could not determine session name — check persona.md.', ephemeral: true }).catch(() => {})
+        return
+      }
+      const args = (interaction.options.getString('args') ?? '').trim()
+      const cmd = args ? `/${interaction.commandName} ${args}` : `/${interaction.commandName}`
+      try {
+        execSync(`tmux send-keys -t "${session}" ${JSON.stringify(cmd)} Enter`, { timeout: 5000 })
+        await interaction.reply({ content: `✓ Sent \`${cmd}\`` }).catch(() => {})
+      } catch (err) {
+        await interaction.reply({ content: `❌ Failed: ${err instanceof Error ? err.message : String(err)}`, ephemeral: true }).catch(() => {})
+      }
     }
     return
   }
@@ -1102,6 +1116,30 @@ client.once('ready', async c => {
     { name: 'compact', description: 'Compact context' },
     { name: 'clear', description: 'Clear conversation' },
     { name: 'model', description: 'Switch model', options: [modelOption] },
+    {
+      name: 'loop',
+      description: 'Start /loop — repeats a prompt on a schedule (or dynamic pacing if no interval)',
+      options: [
+        {
+          type: 3,
+          name: 'args',
+          description: 'Everything after /loop (e.g. "5m check the PR" or "babysit PR 175"). Empty = bare /loop.',
+          required: false,
+        },
+      ],
+    },
+    {
+      name: 'goal',
+      description: 'Set /goal — Claude works until the condition is met. No args = check status. "clear" to stop.',
+      options: [
+        {
+          type: 3,
+          name: 'args',
+          description: 'Goal condition (e.g. "PR 175 is merged with green CI"). Empty = status. "clear" to stop.',
+          required: false,
+        },
+      ],
+    },
   ]
   try {
     if (guildId) {
