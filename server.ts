@@ -704,7 +704,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
         }
 
-        void voiceManager.speakForChat(chat_id, text)
+        const voiceGuildId = voiceManager.guildIdForChat(chat_id)
+        if (voiceManager.isFull(voiceGuildId)) void voiceManager.speakForChat(chat_id, text)
 
         const result =
           sentIds.length === 1
@@ -820,6 +821,17 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       try {
         if (subcommand === 'leave') {
           await interaction.editReply(voiceManager.leave(interaction.guildId ?? undefined)).catch(() => {})
+        } else if (subcommand === 'mode') {
+          const mode = interaction.options.getString('mode')
+          if (mode !== 'full' && mode !== 'listen') {
+            await interaction.editReply(voiceManager.modeStatus(interaction.guildId)).catch(() => {})
+            return
+          }
+          if (!interaction.guildId) {
+            await interaction.editReply('❌ Voice mode only works in a server.').catch(() => {})
+            return
+          }
+          await interaction.editReply(voiceManager.setMode(interaction.guildId, mode)).catch(() => {})
         } else {
           if (!(await interactionAllowedInGroupChannel(interaction, access, uid))) {
             await interaction.editReply('❌ Voice failed: this channel is not allowlisted for voice.').catch(() => {})
@@ -1068,6 +1080,23 @@ client.once('ready', async c => {
       options: [
         { type: 1, name: 'join', description: 'Join Fernando\'s current voice channel' },
         { type: 1, name: 'leave', description: 'Leave voice' },
+        {
+          type: 1,
+          name: 'mode',
+          description: 'Switch voice mode (full/listen)',
+          options: [
+            {
+              type: 3,
+              name: 'mode',
+              description: 'Voice mode',
+              required: false,
+              choices: [
+                { name: 'full', value: 'full' },
+                { name: 'listen', value: 'listen' },
+              ],
+            },
+          ],
+        },
       ],
     },
     { name: 'compact', description: 'Compact context' },

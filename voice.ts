@@ -13,8 +13,11 @@ const DEFAULT_FERNANDO_USER_ID = '301045022361518081'
 const MIN_UTTERANCE_MS = 300
 const INACTIVITY_LEAVE_MS = 10 * 60 * 1000
 
+export type VoiceMode = 'full' | 'listen'
+
 type VoiceState = {
   guildId: string
+  mode: VoiceMode
   voiceChannelId: string
   textChannelId: string
   connection: VoiceConnection
@@ -85,6 +88,7 @@ export class VoiceManager {
 
     const state: VoiceState = {
       guildId,
+      mode: 'full',
       voiceChannelId: voiceChannel.id,
       textChannelId,
       connection,
@@ -119,6 +123,36 @@ export class VoiceManager {
     try { state.connection.destroy() } catch {}
     this.states.delete(targetGuildId)
     return 'Left voice.'
+  }
+
+  guildIdForChat(chatId: string): string | null {
+    return [...this.states.values()].find(s => s.textChannelId === chatId)?.guildId ?? null
+  }
+
+  currentMode(guildId: string | null | undefined): VoiceMode {
+    if (!guildId) return 'full'
+    return this.states.get(guildId)?.mode ?? 'full'
+  }
+
+  modeStatus(guildId: string | null | undefined): string {
+    if (!guildId || !this.states.has(guildId)) {
+      return 'Not connected to voice. Current default mode: full. Valid options: full, listen. Use `/voice join` first.'
+    }
+    return `Current voice mode: ${this.currentMode(guildId)}. Valid options: full, listen.`
+  }
+
+  setMode(guildId: string, mode: VoiceMode): string {
+    const state = this.states.get(guildId)
+    if (!state) return 'Not connected to voice. Use `/voice join` first, then try `/voice mode full` or `/voice mode listen`.'
+    state.mode = mode
+    return mode === 'full'
+      ? 'Voice mode set to full: I will transcribe voice and speak replies.'
+      : 'Voice mode set to listen: I will transcribe voice and reply in text only.'
+  }
+
+  isFull(guildId: string | null | undefined): boolean {
+    if (!guildId) return true
+    return this.states.get(guildId)?.mode !== 'listen'
   }
 
   async speakForChat(chatId: string, text: string): Promise<void> {
