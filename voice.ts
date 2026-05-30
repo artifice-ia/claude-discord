@@ -88,7 +88,7 @@ export class VoiceManager {
 
     const state: VoiceState = {
       guildId,
-      mode: 'full',
+      mode: 'listen',
       voiceChannelId: voiceChannel.id,
       textChannelId,
       connection,
@@ -131,12 +131,12 @@ export class VoiceManager {
 
   currentMode(guildId: string | null | undefined): VoiceMode {
     if (!guildId) return 'full'
-    return this.states.get(guildId)?.mode ?? 'full'
+    return this.states.get(guildId)?.mode ?? 'listen'
   }
 
   modeStatus(guildId: string | null | undefined): string {
     if (!guildId || !this.states.has(guildId)) {
-      return 'Not connected to voice. Current default mode: full. Valid options: full, listen. Use `/voice join` first.'
+      return 'Not connected to voice. Current default mode: listen. Valid options: full, listen. Use `/voice join` first.'
     }
     return `Current voice mode: ${this.currentMode(guildId)}. Valid options: full, listen.`
   }
