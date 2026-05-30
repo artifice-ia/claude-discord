@@ -108,7 +108,8 @@ process.stdin.on('end', async () => {
   state.forwarded_up_to = maxIndex
   try { writeFileSync(stateFile, JSON.stringify(state)) } catch {}
 
-  const allText = toForward.map(x => x.text).join('\n\n')
+  // Wrap in italics so internal thinking is visually distinct from the reply.
+  const allText = '_' + toForward.map(x => x.text).join('\n\n') + '_'
 
   const chunks = []
   let rest = allText
