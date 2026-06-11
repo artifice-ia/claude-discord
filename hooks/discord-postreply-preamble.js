@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // discord-postreply-preamble.js — PostToolUse hook (reply tool)
 // After the reply tool fires, check for assistant text in the current turn
-// that wasn't included in the reply. Edit the sent Discord message to prepend
-// the preamble — one message, preamble on top, reply below a divider.
+// that wasn't included in the reply. Post the preamble as a follow-up message.
 //
 // Why PostToolUse and not PreToolUse: text entries are written to the JSONL
 // transcript when the tool fires, not when the text is generated. PreToolUse
@@ -59,20 +58,12 @@ process.stdin.on('end', async () => {
 
   const isReplyTool = tool_name === REPLY_TOOL
   const channel = tool_input && tool_input.chat_id
-  const replyText = (tool_input && tool_input.text) || ''
-
   let persona = {}
   try { persona = readFrontmatter(require('fs').readFileSync(personaPath, 'utf8')) } catch {}
   const personaChannel = persona.discord_channel || ''
 
-  // For the reply tool, we need the message ID to edit-in the preamble.
-  let messageId = null
   if (isReplyTool) {
-    const toolResp = payload.tool_response ?? payload.tool_result ?? ''
-    const respStr = typeof toolResp === 'string' ? toolResp : JSON.stringify(toolResp)
-    const msgIdMatch = respStr.match(/id[:\s"]+(\d{17,20})/)
-    messageId = msgIdMatch && msgIdMatch[1]
-    if (!messageId || !channel) process.exit(0)
+    if (!channel) process.exit(0)
   } else {
     // Non-reply tools: send preamble to persona channel if there is one.
     if (!personaChannel) process.exit(0)
@@ -137,7 +128,9 @@ process.stdin.on('end', async () => {
   state.forwarded_up_to = maxIndex
   try { writeFileSync(stateFile, JSON.stringify(state)) } catch {}
 
-  const preamble = '_' + toForward.map(x => x.text).join('\n\n') + '_'
+  const preambleText = toForward.map(x => x.text).join('\n\n').trim()
+  const italicPreamble = `_${preambleText}_`
+  const preamble = italicPreamble
 
   const isFernandoChannel = personaChannel && channel === personaChannel
 
@@ -145,12 +138,10 @@ process.stdin.on('end', async () => {
     let body, path, method
 
     if (isReplyTool && isFernandoChannel) {
-      // Patch reply message to prepend preamble — one message, preamble on top.
-      const newContent = `${preamble}\n\n---\n\n${replyText}`
-      const editContent = newContent.length > 2000 ? newContent.slice(0, 1997) + '...' : newContent
-      body = JSON.stringify({ content: editContent })
-      path = `/api/v10/channels/${channel}/messages/${messageId}`
-      method = 'PATCH'
+      const sendContent = italicPreamble.length > 2000 ? italicPreamble.slice(0, 1997) + '…' : italicPreamble
+      body = JSON.stringify({ content: sendContent })
+      path = `/api/v10/channels/${channel}/messages`
+      method = 'POST'
     } else {
       // Non-reply tool or fleet channel: send preamble as a standalone italic message
       // to persona channel so it appears immediately when the tool fires.
