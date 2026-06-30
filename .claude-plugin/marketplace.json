@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "artifice-discord",
-  "description": "Artifice fleet Discord channel for Claude Code.",
+  "description": "A stripped-down and enhanced fork of Claude Code's official Discord plugin.",
   "owner": {
     "name": "Artifice contributors"
   },
   "plugins": [
     {
       "name": "artifice-discord",
-      "description": "Two-way Discord channel for Claude Code — forked from the official plugin, owns the full inbound+outbound pipe, with live tool-usage streaming. Powers the Artifice fleet.",
+      "description": "A stripped-down and enhanced fork of Claude Code's official Discord plugin. Adds live tool-usage streaming, voice mode (Whisper STT + TTS), and customizable hooks for typing indicators, completion previews, and stop signals.",
       "source": "./",
       "category": "productivity"
     }
