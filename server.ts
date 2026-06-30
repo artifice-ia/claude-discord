@@ -981,7 +981,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 client.on('messageCreate', msg => {
   if (msg.author.bot) {
     // Allow bot messages only if the sender is explicitly trusted in allowFrom.
-    // This enables fleet bots (e.g. Ohm, Vec) to doorbell via watched channels.
+    // This enables trusted bots to doorbell via watched channels.
     const access = loadAccess()
     const botId = msg.author.id
     const inTopLevel = access.allowFrom.includes(botId)

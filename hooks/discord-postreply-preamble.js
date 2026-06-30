@@ -132,12 +132,12 @@ process.stdin.on('end', async () => {
   const italicPreamble = `_${preambleText}_`
   const preamble = italicPreamble
 
-  const isFernandoChannel = personaChannel && channel === personaChannel
+  const isPrimaryChannel = personaChannel && channel === personaChannel
 
   await new Promise(resolve => {
     let body, path, method
 
-    if (isReplyTool && isFernandoChannel) {
+    if (isReplyTool && isPrimaryChannel) {
       const sendContent = italicPreamble.length > 2000 ? italicPreamble.slice(0, 1997) + '…' : italicPreamble
       body = JSON.stringify({ content: sendContent })
       path = `/api/v10/channels/${channel}/messages`

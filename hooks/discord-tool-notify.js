@@ -81,7 +81,7 @@ process.stdin.on('end', () => {
       try {
         const json = JSON.parse(data)
         if (json.id) {
-          writeFileSync('/tmp/deet-tool-notify-last', JSON.stringify({ msg_id: json.id, channel }))
+          writeFileSync('/tmp/artifice-discord-tool-notify-last', JSON.stringify({ msg_id: json.id, channel }))
         }
       } catch {}
       process.exit(0)
