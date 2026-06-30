@@ -60,6 +60,11 @@ This is a local fork, not a marketplace plugin. Point Claude Code at this checko
 
 Writes `DISCORD_BOT_TOKEN=...` to `~/.claude/channels/discord/.env`. You can also write that file by hand, or set the variable in your shell environment — shell takes precedence.
 
+Voice features also read these environment variables:
+
+- `DISCORD_VOICE_USER_ID` — required for voice features; set it to the Discord user ID the bot should listen to in voice channels.
+- `DISCORD_VOICE_USER_NAME` — optional display name for voice transcripts; defaults to `User`.
+
 > To run multiple bots on one machine (different tokens, separate allowlists), point `DISCORD_STATE_DIR` at a different directory per instance.
 
 **6. Relaunch with the channel flag.**
@@ -111,6 +116,9 @@ Configuration:
 
 ```sh
 export OPENAI_API_KEY=sk-...
+export DISCORD_VOICE_USER_ID=123456789012345678
+# Optional:
+export DISCORD_VOICE_USER_NAME="User"
 ```
 
 STT uses OpenAI Whisper (`whisper-1`). TTS uses OpenAI `tts-1`.
@@ -126,7 +134,7 @@ Usage:
 Notes:
 
 - The bot does not hardcode a channel ID; it looks up Fernando's current voice channel when `/voice join` runs.
-- Fernando's Discord user ID defaults to `301045022361518081`; override with `DISCORD_VOICE_USER_ID` if needed.
+- Voice mode requires `DISCORD_VOICE_USER_ID`; set it to the Discord user ID the bot should listen to in voice channels.
 - The bot buffers Fernando's Discord Opus packets while PTT is active, ignores taps under 300ms, transcribes on PTT release, and auto-leaves after 10 minutes of inactivity.
 - TTS voice defaults to `onyx`; set `tts_voice:` in `~/.claude/persona.md` to override (valid values: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`).
 - Voice mode resets to the default (`listen`) on each new `/voice join`.

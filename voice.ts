@@ -9,9 +9,15 @@ import { ChannelType, type ChatInputCommandInteraction, type Client, type VoiceB
 import { transcribe } from './stt'
 import { speak } from './tts'
 
-const DEFAULT_FERNANDO_USER_ID = '301045022361518081'
+const MISSING_VOICE_USER_ID_MESSAGE = 'DISCORD_VOICE_USER_ID env var required — set it to the Discord user ID the bot should listen to in voice channels.'
 const MIN_UTTERANCE_MS = 300
 const INACTIVITY_LEAVE_MS = 10 * 60 * 1000
+
+export function requiredVoiceUserId(targetUserId?: string): string {
+  const userId = targetUserId ?? process.env.DISCORD_VOICE_USER_ID
+  if (!userId) throw new Error(MISSING_VOICE_USER_ID_MESSAGE)
+  return userId
+}
 
 export type VoiceMode = 'full' | 'listen'
 
@@ -36,20 +42,20 @@ type VoiceManagerOptions = {
 
 export class VoiceManager {
   private client: Client
-  private targetUserId: string
+  private targetUserId?: string
   private onTranscript: VoiceManagerOptions['onTranscript']
   private states = new Map<string, VoiceState>()
 
   constructor(opts: VoiceManagerOptions) {
     this.client = opts.client
-    this.targetUserId = opts.targetUserId ?? process.env.DISCORD_VOICE_USER_ID ?? DEFAULT_FERNANDO_USER_ID
+    this.targetUserId = opts.targetUserId
     this.onTranscript = opts.onTranscript
   }
 
   async joinFromInteraction(interaction: ChatInputCommandInteraction): Promise<string> {
     if (!interaction.guild) throw new Error('/voice join only works in a server')
 
-    const member = await interaction.guild.members.fetch(this.targetUserId)
+    const member = await interaction.guild.members.fetch(requiredVoiceUserId(this.targetUserId))
     const voiceChannel = member.voice.channel
     if (!voiceChannel) throw new Error('Fernando is not currently in a voice channel in this server')
     if (voiceChannel.type !== ChannelType.GuildVoice && voiceChannel.type !== ChannelType.GuildStageVoice) {
@@ -190,7 +196,7 @@ export class VoiceManager {
       // Subscribe proactively rather than waiting for receiver.speaking.on('start').
       // AfterSilence closes the stream ~400ms after the last packet, which catches
       // PTT release without needing the voice gateway Speaking opcode.
-      const stream = receiver.subscribe(this.targetUserId, {
+      const stream = receiver.subscribe(requiredVoiceUserId(this.targetUserId), {
         end: { behavior: EndBehaviorType.AfterSilence, duration: 400 },
       })
       state.stream = stream
