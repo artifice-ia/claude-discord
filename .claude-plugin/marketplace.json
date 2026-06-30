@@ -3,7 +3,7 @@
   "name": "artifice-discord",
   "description": "Artifice fleet Discord channel for Claude Code.",
   "owner": {
-    "name": "Fernando Baz"
+    "name": "Artifice contributors"
   },
   "plugins": [
     {
