@@ -1,7 +1,7 @@
 {
   "name": "artifice-discord",
-  "description": "Two-way Discord channel for Claude Code \u2014 forked from the official plugin, owns the full inbound+outbound pipe, with live tool-usage streaming. Powers the Artifice fleet. Access via /artifice-discord:access.",
-  "version": "0.2.1",
+  "description": "A stripped-down and enhanced fork of Claude Code's official Discord plugin. Adds live tool-usage streaming, voice mode (Whisper STT + TTS), and customizable hooks. Access via /artifice-discord:access.",
+  "version": "0.2.2",
   "author": {
     "name": "Artifice contributors"
   },
