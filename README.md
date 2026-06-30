@@ -1,10 +1,20 @@
 # artifice-discord
 
-Two-way Discord channel for Claude Code. A fork of Anthropic's official `discord` plugin, rebranded to own the full inbound+outbound pipe, with live tool-usage streaming.
+![version](https://img.shields.io/badge/version-0.2.3-blue) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+
+Run Claude Code from Discord. Chat with the assistant, see live tool usage, talk to it via voice — all from your phone, your laptop, or any device where Discord runs.
 
 When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, edit, fetch history, and download attachments.
 
-> **Fork note:** upstream is `anthropics/claude-plugins-official` (`external_plugins/discord`). This repo gutted the monorepo down to just that plugin and rebranded it: plugin name, MCP server name, and skill namespace are all `artifice-discord`. State still lives under `~/.claude/channels/discord/` so it inherits the existing channel allowlist. Pull upstream fixes by cherry-picking from the `upstream` remote.
+> **Fork note:** upstream is `anthropics/claude-plugins-official` (`external_plugins/discord`). Plugin name, MCP server name, and skill namespace are all `artifice-discord`. State lives under `~/.claude/channels/discord/`. Pull upstream fixes by cherry-picking from the `upstream` remote.
+
+## What's different from the official plugin
+
+- **Live tool-usage streaming** — see what the assistant is doing in real time, not just final replies
+- **Voice mode** — speak to Claude via Discord voice channels (Whisper STT, tts-1 TTS)
+- **Customizable hooks** — typing indicators, post-reply preambles, stop signals
+- **`/model` slash command** — switch models without restarting the session
+- **Smaller surface area** — stripped of upstream features not needed for the personal/agent use case
 
 ## Prerequisites
 

@@ -3,7 +3,7 @@
   "name": "artifice-discord",
   "description": "A stripped-down and enhanced fork of Claude Code's official Discord plugin.",
   "owner": {
-    "name": "Artifice contributors"
+    "name": "Fernando Baz"
   },
   "plugins": [
     {

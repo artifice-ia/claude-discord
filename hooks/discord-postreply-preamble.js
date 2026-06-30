@@ -143,7 +143,7 @@ process.stdin.on('end', async () => {
       path = `/api/v10/channels/${channel}/messages`
       method = 'POST'
     } else {
-      // Non-reply tool or fleet channel: send preamble as a standalone italic message
+      // Non-reply tool or non-primary channel: send preamble as a standalone italic message
       // to persona channel so it appears immediately when the tool fires.
       const sendContent = preamble.length > 2000 ? preamble.slice(0, 1997) + '...' : preamble
       if (!personaChannel) { resolve(); return }
