@@ -35,7 +35,7 @@ import { execSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
-import { VoiceManager } from './voice'
+import { VoiceManager, requiredVoiceUserId } from './voice'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -512,8 +512,8 @@ const voiceManager = new VoiceManager({
         meta: {
           chat_id: chatId,
           message_id: `voice-${Date.now()}`,
-          user: 'Fernando',
-          user_id: process.env.DISCORD_VOICE_USER_ID ?? '301045022361518081',
+          user: process.env.DISCORD_VOICE_USER_NAME ?? 'User',
+          user_id: requiredVoiceUserId(),
           ts: new Date().toISOString(),
           voice: 'true',
           voice_channel_id: voiceChannelId,
