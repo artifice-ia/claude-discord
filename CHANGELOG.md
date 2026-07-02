@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.2.4 - 2026-07-02
+- Add fable model support in /model command
+
 ## 0.2.3 - 2026-06-30
 - Correct author/owner attribution
 - Drop internal keyword; add SEO-relevant keywords (claude-code, agent, ai)
