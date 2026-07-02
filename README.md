@@ -6,7 +6,7 @@ Run Claude Code from Discord. Chat with the assistant, see live tool usage, talk
 
 When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, edit, fetch history, and download attachments.
 
-> **Fork note:** upstream is `anthropics/claude-plugins-official` (`external_plugins/discord`). Plugin name, MCP server name, and skill namespace are all `artifice-discord`. State lives under `~/.claude/channels/discord/`. Pull upstream fixes by cherry-picking from the `upstream` remote.
+> **Origin note:** this plugin is based on `anthropics/claude-plugins-official` (`external_plugins/discord`). Plugin name, MCP server name, and skill namespace are all `artifice-discord`. State lives under `~/.claude/channels/discord/`. Pull upstream fixes by cherry-picking from the `upstream` remote.
 
 ## What's different from the official plugin
 
@@ -58,7 +58,7 @@ Integration type: **Guild Install**. Copy the **Generated URL**, open it, and ad
 
 **4. Install the plugin.**
 
-This is a local fork, not a marketplace plugin. Point Claude Code at this checkout as a local plugin / marketplace, then `/reload-plugins`.
+This is a local plugin based on the official Discord plugin, not a marketplace plugin. Point Claude Code at this checkout as a local plugin / marketplace, then `/reload-plugins`.
 
 > **Do not run this alongside the official `discord` plugin.** Both open a Discord gateway connection; on the same bot token they fight for the same shard and knock each other offline. The cutover is atomic: this plugin on, the official plugin off, same restart.
 

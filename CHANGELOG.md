@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5 - 2026-07-02
+- Skip preply forwarding immediately when the reply tool is sending non-empty text, preventing duplicate sends
+- Reword README upstream attribution to say the plugin is based on `anthropics/claude-plugins-official` without fork framing
+
 ## 0.2.4 - 2026-07-02
 - Add fable model support in /model command
 
