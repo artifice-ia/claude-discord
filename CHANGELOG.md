@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5 - 2026-07-02
+- Skip post-reply preamble forwarding immediately when the reply tool is sending non-empty text, preventing duplicate sends
+- Remove unregistered orphan hook `hooks/discord-preply-forward.js`
+- Update the `sonnet` model mapping to `claude-sonnet-5`
+- Reword README upstream attribution to say the plugin is based on `anthropics/claude-plugins-official` without fork framing
+
 ## 0.2.4 - 2026-07-02
 - Add fable model support in /model command
 

@@ -69,6 +69,15 @@ process.stdin.on('end', async () => {
     if (!personaChannel) process.exit(0)
   }
 
+  // If a reply is being sent with non-empty text, trust that as the intended
+  // message and skip forwarding any main-loop preamble. Prevents double-sends
+  // when the agent writes the full response as text before calling reply with
+  // the same content. Non-reply tool-notify preambles are unaffected.
+  if (isReplyTool) {
+    const replyText = tool_input && typeof tool_input.text === 'string' ? tool_input.text.trim() : ''
+    if (replyText.length > 0) process.exit(0)
+  }
+
   // Per-session state — tracks which transcript entries have been prepended
   // so multiple reply calls in one turn don't double-forward.
   const stateFile = join(tmpdir(), `discord-postreply-${session_id}.json`)
