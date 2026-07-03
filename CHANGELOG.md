@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7 - 2026-07-03
+- Pin @discordjs/builders to 1.14.1 to work around a crash caused by the @sapphire/shapeshift@4.0.0 nativeEnum regression on discord.js 14.25.x
+- Sync .claude-plugin/plugin.json version with package.json
+
 ## 0.2.6 - 2026-07-03
 - Update the opus model mapping to claude-opus-4-8
 

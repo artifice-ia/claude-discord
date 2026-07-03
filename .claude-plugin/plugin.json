@@ -1,7 +1,7 @@
 {
   "name": "artifice-discord",
   "description": "A stripped-down and enhanced fork of Claude Code's official Discord plugin. Adds live tool-usage streaming, voice mode (Whisper STT + TTS), and customizable hooks. Access via /artifice-discord:access.",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "author": {
     "name": "Fernando Baz"
   },
