@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.2.6 - 2026-07-03
+- Update the opus model mapping to claude-opus-4-8
+
 ## 0.2.5 - 2026-07-02
 - Skip post-reply preamble forwarding immediately when the reply tool is sending non-empty text, preventing duplicate sends
 - Remove unregistered orphan hook `hooks/discord-preply-forward.js`
