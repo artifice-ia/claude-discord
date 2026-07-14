@@ -23,10 +23,10 @@ const MEMORY_SAVE_THRESHOLD = 0.70;
 const MODEL_CONTEXT_WINDOWS = {
   "claude-opus-4-7":        1_000_000,
   "claude-opus-4-8":        1_000_000,
-  "claude-opus-4-6":        200_000,
+  "claude-opus-4-6":        1_000_000,
   "claude-opus-4-5":        200_000,
   "claude-sonnet-5":        1_000_000,
-  "claude-sonnet-4-6":      200_000,
+  "claude-sonnet-4-6":      1_000_000,
   "claude-haiku-4-5":       200_000,
   "claude-haiku-4-5-20251001": 200_000,
   "claude-fable-5":         1_000_000,
