@@ -12,8 +12,35 @@ const https = require('https');
 const path = require('path');
 const os = require('os');
 
-const CONTEXT_LIMIT = 200_000;
+// Fallback if the model is unknown. Real limit is looked up per-model at run
+// time from the last assistant entry's `message.model`.
+const CONTEXT_LIMIT_FALLBACK = 200_000;
 const MEMORY_SAVE_THRESHOLD = 0.70;
+
+// Model → context-window size (tokens). Update when new models ship.
+// Missing → CONTEXT_LIMIT_FALLBACK. Deet was reporting 386%+ before this
+// map existed because the hardcoded 200k didn't match Opus 4.7's 1M window.
+const MODEL_CONTEXT_WINDOWS = {
+  "claude-opus-4-7":        1_000_000,
+  "claude-opus-4-8":        1_000_000,
+  "claude-opus-4-6":        200_000,
+  "claude-opus-4-5":        200_000,
+  "claude-sonnet-5":        200_000,
+  "claude-sonnet-4-6":      200_000,
+  "claude-haiku-4-5":       200_000,
+  "claude-haiku-4-5-20251001": 200_000,
+  "claude-fable-5":         200_000,
+};
+
+function windowForModel(modelId) {
+  if (!modelId) return CONTEXT_LIMIT_FALLBACK;
+  if (MODEL_CONTEXT_WINDOWS[modelId]) return MODEL_CONTEXT_WINDOWS[modelId];
+  // Prefix match: `claude-opus-4-7-20260415` → `claude-opus-4-7`
+  for (const [prefix, window] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (modelId.startsWith(prefix)) return window;
+  }
+  return CONTEXT_LIMIT_FALLBACK;
+}
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const personaPath = path.join(claudeDir, 'persona.md');
@@ -75,6 +102,7 @@ function parseSession(filePath) {
 
   const entries = [];
   let lastInputTokens = 0;
+  let lastModel = null;
   let totalOutputTokens = 0;
   let turns = 0;
 
@@ -86,11 +114,12 @@ function parseSession(filePath) {
     if (entry.type !== 'assistant' || !entry.message?.usage) continue;
     const u = entry.message.usage;
     lastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    lastModel = entry.message.model || lastModel;
     totalOutputTokens += (u.output_tokens || 0);
     turns++;
   }
 
-  return { lastInputTokens, totalOutputTokens, turns, entries };
+  return { lastInputTokens, lastModel, totalOutputTokens, turns, entries };
 }
 
 // Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
@@ -168,12 +197,20 @@ process.stdin.on('end', async () => {
   const parsed = parseSession(sessionFile);
   if (!parsed || parsed.turns === 0) { process.exit(0); return; }
 
-  const { lastInputTokens, totalOutputTokens, turns, entries } = parsed;
-  const pct = Math.round((lastInputTokens / CONTEXT_LIMIT) * 100);
+  const { lastInputTokens, lastModel, totalOutputTokens, turns, entries } = parsed;
+  const contextLimit = windowForModel(lastModel);
+  const pct = Math.round((lastInputTokens / contextLimit) * 100);
   const inputK = Math.round(lastInputTokens / 1000);
-  const limitK = Math.round(CONTEXT_LIMIT / 1000);
+  const limitK = Math.round(contextLimit / 1000);
 
-  const data = { pct, inputTokens: lastInputTokens, outputTokens: totalOutputTokens, limit: CONTEXT_LIMIT, turns };
+  const data = {
+    pct,
+    inputTokens: lastInputTokens,
+    outputTokens: totalOutputTokens,
+    limit: contextLimit,
+    model: lastModel,
+    turns
+  };
   const text = `ctx ${pct}% | ${inputK}k/${limitK}k in | ${totalOutputTokens.toLocaleString()} out`;
 
   try {
@@ -182,13 +219,13 @@ process.stdin.on('end', async () => {
   } catch {}
 
   // At 70%+: always write memory alarm flag. Discord notification uses separate dedup flag.
-  if (lastInputTokens / CONTEXT_LIMIT >= MEMORY_SAVE_THRESHOLD) {
+  if (lastInputTokens / contextLimit >= MEMORY_SAVE_THRESHOLD) {
     try {
       fs.writeFileSync(MEM_FLAG, JSON.stringify({ pct, inputTokens: lastInputTokens, ts: Date.now() }));
     } catch {}
 
     if (!fs.existsSync(DISCORD_SENT_FLAG)) {
-      const msg = `⚠️ Context at ${pct}% (${inputK}k/200k). Memory save alarm set — I'll write session summary to scroll + graph on next message.`;
+      const msg = `⚠️ Context at ${pct}% (${inputK}k/${limitK}k). Memory save alarm set — I'll write session summary to scroll + graph on next message.`;
       const status = await postToDiscord(DISCORD_CHANNEL, msg);
       if (status !== null && status >= 200 && status < 300) {
         try { fs.writeFileSync(DISCORD_SENT_FLAG, JSON.stringify({ pct, ts: Date.now() })); } catch {}
