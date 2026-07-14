@@ -32,13 +32,20 @@ const MODEL_CONTEXT_WINDOWS = {
   "claude-fable-5":         1_000_000,
 };
 
-// Claude Code caps context at 200K for any model when this env var is set.
-// See https://code.claude.com/docs/en/model-config — `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`
-// treats Sonnet 5 sessions as having a 200K window, and by extension applies to
-// any other 1M-native model the user runs.
+// Claude Code caps context at 200K for any 1M-native model in two situations:
+//   1. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is set — removes 1M variants from the
+//      /model picker and treats every Sonnet 5 session as 200K.
+//   2. Session runs through an LLM gateway (ANTHROPIC_BASE_URL is set) and the
+//      user picked plain `sonnet` / `sonnet-5` rather than the `sonnet[1m]` alias.
+//      Gateway can't advertise 1M support, so Claude Code auto-compacts at 200K.
+// Both cases surface a bare `claude-sonnet-5` (or opus-4-7, etc.) in the transcript,
+// with no distinguishing marker in message.model, so the disambiguation has to
+// come from env vars.
+// See https://code.claude.com/docs/en/model-config#sonnet-5-context-window
 const CAPPED_LIMIT = 200_000;
 function is1MDisabled() {
-  return process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1';
+  return process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1' ||
+         !!process.env.ANTHROPIC_BASE_URL;
 }
 
 function windowForModel(modelId) {
