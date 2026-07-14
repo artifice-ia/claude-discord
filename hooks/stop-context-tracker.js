@@ -32,14 +32,27 @@ const MODEL_CONTEXT_WINDOWS = {
   "claude-fable-5":         1_000_000,
 };
 
+// Claude Code caps context at 200K for any model when this env var is set.
+// See https://code.claude.com/docs/en/model-config — `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`
+// treats Sonnet 5 sessions as having a 200K window, and by extension applies to
+// any other 1M-native model the user runs.
+const CAPPED_LIMIT = 200_000;
+function is1MDisabled() {
+  return process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1';
+}
+
 function windowForModel(modelId) {
   if (!modelId) return CONTEXT_LIMIT_FALLBACK;
-  if (MODEL_CONTEXT_WINDOWS[modelId]) return MODEL_CONTEXT_WINDOWS[modelId];
-  // Prefix match: `claude-opus-4-7-20260415` → `claude-opus-4-7`
-  for (const [prefix, window] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
-    if (modelId.startsWith(prefix)) return window;
+  const disabled = is1MDisabled();
+  let raw = MODEL_CONTEXT_WINDOWS[modelId];
+  if (raw === undefined) {
+    // Prefix match: `claude-opus-4-7-20260415` → `claude-opus-4-7`
+    for (const [prefix, window] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+      if (modelId.startsWith(prefix)) { raw = window; break; }
+    }
   }
-  return CONTEXT_LIMIT_FALLBACK;
+  if (raw === undefined) return disabled ? CAPPED_LIMIT : CONTEXT_LIMIT_FALLBACK;
+  return disabled && raw > CAPPED_LIMIT ? CAPPED_LIMIT : raw;
 }
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
