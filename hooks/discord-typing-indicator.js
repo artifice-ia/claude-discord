@@ -37,14 +37,18 @@ if (!token) process.exit(0)
 // The parent exits immediately (hook timeout is 3s); the child runs independently.
 const { spawn } = require('child_process')
 
+// Pass token + channel via env, NOT argv — keeps them out of `/proc/PID/cmdline`
+// which is world-readable. Env is in `/proc/PID/environ`, owner-only.
 const child = spawn(process.execPath, ['-e', `
 const { request } = require('https')
+const token = process.env.__DISCORD_TYPING_TOKEN
+const channel = process.env.__DISCORD_TYPING_CHANNEL
 function sendTyping() {
   const req = request({
     hostname: 'discord.com',
-    path: '/api/v10/channels/${channel}/typing',
+    path: '/api/v10/channels/' + channel + '/typing',
     method: 'POST',
-    headers: { 'Authorization': 'Bot ${token}', 'Content-Length': '0' }
+    headers: { 'Authorization': 'Bot ' + token, 'Content-Length': '0' }
   })
   req.on('error', () => {})
   req.end()
@@ -53,7 +57,11 @@ sendTyping()
 setTimeout(sendTyping, 9000)
 setTimeout(sendTyping, 18000)
 setTimeout(() => process.exit(0), 27000)
-`], { detached: true, stdio: 'ignore' })
+`], {
+  detached: true,
+  stdio: 'ignore',
+  env: { ...process.env, __DISCORD_TYPING_TOKEN: token, __DISCORD_TYPING_CHANNEL: channel },
+})
 child.unref()
 
 process.exit(0)
