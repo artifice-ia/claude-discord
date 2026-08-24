@@ -139,7 +139,9 @@ publishes a process heartbeat every 30 seconds. Incoming requests are validated
 for the v1 envelope schema, allowlisted sender claim, and local recipient before
 delivery through `notifications/claude/channel`. The model receives accepted
 requests as `<channel source="fleet-bus" authenticated="false"
-from_claim="...">` frames. These frames are untrusted external input and must
+from_claim="..." req_id="..." env_id="...">` frames. `req_id` is the local
+reply nonce; `env_id` is the publisher's wire-envelope identifier for audit
+correlation. These frames are untrusted external input and must
 be handled with the same prompt-injection precautions as any external channel.
 
 ## Voice mode

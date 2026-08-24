@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_ENVELOPE_BYTES,
   createHeartbeatEnvelope,
   FleetBus,
+  buildFleetBusFrameMeta,
   loadFleetManifestAllowlist,
   normalizeAllowlist,
   normalizeBotName,
@@ -133,6 +134,19 @@ describe('request session injection', () => {
     expect(events[0].envelope.from).toBe('ohm')
     expect(events[0].reqId).toMatch(/^[a-f0-9]{32}$/)
     expect(events[0].reqId).not.toBe(value.id)
+  })
+
+  test('frame metadata exposes both the server nonce and wire envelope id', () => {
+    const value = envelope()
+    expect(buildFleetBusFrameMeta({ envelope: value, reqId: 'a'.repeat(32) })).toEqual({
+      source: 'fleet-bus',
+      authenticated: 'false',
+      from_claim: 'ohm',
+      kind: 'pr_review_request',
+      req_id: 'a'.repeat(32),
+      env_id: value.id,
+      ts: value.ts,
+    })
   })
 
   test.each(['fernando', 'unknown', 'оhm'])('rejects from_claim %s and audits the drop', async from => {

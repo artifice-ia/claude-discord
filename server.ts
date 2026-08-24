@@ -36,7 +36,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { VoiceManager, requiredVoiceUserId, voiceUserName } from './voice'
-import { FleetBus, loadFleetManifestAllowlist, normalizeBotName } from './src/fleet-bus'
+import { buildFleetBusFrameMeta, FleetBus, loadFleetManifestAllowlist, normalizeBotName } from './src/fleet-bus'
 import packageJson from './package.json' with { type: 'json' }
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
@@ -827,19 +827,12 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
           pluginVersion: packageJson.version,
           logger: message => process.stderr.write(`artifice-discord: ${message}\n`),
           auditLogPath: process.env.FLEET_BUS_AUDIT_LOG_PATH ?? join(homedir(), '.claude', 'fleet-bus-log.jsonl'),
-          injectIntoSession: async ({ envelope, reqId }) => {
+          injectIntoSession: async event => {
             await mcp.notification({
               method: 'notifications/claude/channel',
               params: {
-                content: `<payload>${JSON.stringify(envelope.payload)}</payload>`,
-                meta: {
-                  source: 'fleet-bus',
-                  authenticated: 'false',
-                  from_claim: envelope.from,
-                  kind: envelope.kind,
-                  req_id: reqId,
-                  ts: envelope.ts,
-                },
+                content: `<payload>${JSON.stringify(event.envelope.payload)}</payload>`,
+                meta: buildFleetBusFrameMeta(event),
               },
             })
           },

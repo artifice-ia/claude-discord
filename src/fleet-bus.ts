@@ -36,6 +36,28 @@ export interface FleetBusSessionEvent {
   reqId: string
 }
 
+export interface FleetBusFrameMeta {
+  source: 'fleet-bus'
+  authenticated: 'false'
+  from_claim: string
+  kind: string
+  req_id: string
+  env_id: string
+  ts: string
+}
+
+export function buildFleetBusFrameMeta({ envelope, reqId }: FleetBusSessionEvent): FleetBusFrameMeta {
+  return {
+    source: 'fleet-bus',
+    authenticated: 'false',
+    from_claim: envelope.from,
+    kind: envelope.kind,
+    req_id: reqId,
+    env_id: envelope.id,
+    ts: envelope.ts,
+  }
+}
+
 export interface TokenBucket {
   allow(key: string): boolean
 }
