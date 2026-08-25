@@ -36,7 +36,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { VoiceManager, requiredVoiceUserId, voiceUserName } from './voice'
-import { buildFleetBusFrameMeta, FleetBus, loadFleetManifestAllowlist, normalizeBotName } from './src/fleet-bus'
+import { buildFleetBusFrameMeta, FleetBus, loadFleetManifestAllowlist, normalizeBotName } from '@artifice-ia/fleet-bus'
 import packageJson from './package.json' with { type: 'json' }
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
