@@ -5,7 +5,7 @@
     "": {
       "name": "artifice-discord",
       "dependencies": {
-        "@artifice-ia/fleet-bus": "git+ssh://git@github.com/artifice-ia/fleet-bus.git",
+        "@artifice-ia/fleet-bus": "github:artifice-ia/fleet-bus",
         "@discordjs/opus": "^0.9.0",
         "@discordjs/voice": "^0.19.2",
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -20,7 +20,7 @@
     "@discordjs/builders": "1.14.1",
   },
   "packages": {
-    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@git+ssh://git@github.com/artifice-ia/fleet-bus.git#42fa61fb05e003268b350667ed1271a32c9c9c58", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "42fa61fb05e003268b350667ed1271a32c9c9c58"],
+    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@github:artifice-ia/fleet-bus#820e4d8", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "artifice-ia-fleet-bus-820e4d8", "sha512-SG9TxMApN1eMpn5jP5dEKGecySqjo9v/N50BdaPdh77yGKHrQUIEGo0YDEhGXWV3V56cLOed1UI7FJyzhviCwg=="],
 
     "@derhuerst/http-basic": ["@derhuerst/http-basic@8.2.4", "", { "dependencies": { "caseless": "^0.12.0", "concat-stream": "^2.0.0", "http-response-object": "^3.0.1", "parse-cache-control": "^1.0.1" } }, "sha512-F9rL9k9Xjf5blCz8HsJRO4diy111cayL2vkY2XE4r4t3n0yPXVYy3KD3nJ1qbrSn9743UWSXH4IwuCa/HWlGFw=="],
 
