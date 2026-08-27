@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 - 2026-08-27
+- Wire `@artifice-ia/fleet-bus@0.2.0` (`bazfer/fleet-bus` at 71c2c6c) — Stage 4 adapter work per `~/vault/projects/fleet/bus/adapter-designs/CLAUDE-CODE-SESSION-ADAPTER-DESIGN.md` (v3).
+- Replace stub `FleetBus.connect()` with the package's supervisor loop (`bus.run()` / `bus.stop()`); reconnects across NATS blips (SPEC §1.7).
+- Add four MCP tools for bus-side reasoning: `bus_request`, `bus_reply`, `bus_status`, `bus_history`.
+- Injection frame now surfaces baton lineage (`root_id`, `origin`, `owner`, `hops`), `unsolicited="true"` on ledger-unmatched `.result`, and `late_reply_env_id` on evicted-request replies. Payload body uses the package's 8KB cap + XML escape.
+- New env knobs: `FLEET_BUS_MODE` (`primary` / `publish-only`), `FLEET_BUS_HEARTBEAT_INTERVAL_MS`, `FLEET_BUS_SUPERVISOR_SLEEP_MS`, plus the package's `FLEET_BUS_RATE_*` overrides.
+- `bus_request` default-appends a reply-discipline hint on `kind: 'text_message'` so codex-container peers wrap their reply in `<BUS to='<self>' kind='result'>`. Disable with `payload_wrap_hint: false`.
+- Version bump 0.5.0 → 0.7.0 (subsumes the deferred #22 refactor which swapped local Stage 1+2 for the packaged import).
+
 ## 0.2.8 - 2026-07-14
 - `stop-context-tracker.js`: resolve context window per model instead of assuming 200K. Maps Opus 4.6/4.7/4.8, Sonnet 4.6/5, and Fable 5 to their real 1M windows; Opus 4.5, Haiku 4.5, and unknown models fall back to 200K. Honors `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` and clamps 1M to 200K when `ANTHROPIC_BASE_URL` is set (gateway can't advertise 1M unless the `sonnet[1m]` alias is picked). Fixes the >100% ctx numbers Deet was reporting on Opus 4.7.
 
