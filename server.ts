@@ -40,8 +40,7 @@ import {
   BusRuntime,
   loadFleetManifestAllowlist,
   normalizeBotName,
-  parseFleetBusMode,
-  parseOptionalPositiveInt,
+  parseFleetBusStartupConfig,
   readAuditTail,
   appendReplyDisciplineHint,
   type BusRuntimeConfig,
@@ -949,19 +948,20 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
     process.stderr.write('artifice-discord: FleetBus disabled: FLEET_BUS_USER or persona name is invalid\n')
   } else {
     const tokenPath = process.env.FLEET_BUS_TOKEN_FILE ?? join(homedir(), '.claude', `fleet-bus-token-${botName}`)
-    let mode: ReturnType<typeof parseFleetBusMode>
-    let heartbeatIntervalMs: number | undefined
-    let supervisorSleepMs: number | undefined
+    // FLEET_BUS_DISABLED=0 is an explicit opt-in — a garbled FLEET_BUS_MODE or
+    // FLEET_BUS_HEARTBEAT_INTERVAL_MS at this point is a misconfiguration the
+    // operator wants to hear about, not a silent bus-disable. Hard-exit so the
+    // wrapper (systemd / compose) surfaces the failure loudly.
+    let startupConfig: ReturnType<typeof parseFleetBusStartupConfig>
     try {
-      mode = parseFleetBusMode(process.env.FLEET_BUS_MODE)
-      heartbeatIntervalMs = parseOptionalPositiveInt(process.env.FLEET_BUS_HEARTBEAT_INTERVAL_MS, 'FLEET_BUS_HEARTBEAT_INTERVAL_MS')
-      supervisorSleepMs = parseOptionalPositiveInt(process.env.FLEET_BUS_SUPERVISOR_SLEEP_MS, 'FLEET_BUS_SUPERVISOR_SLEEP_MS')
+      startupConfig = parseFleetBusStartupConfig(process.env)
     } catch (error) {
-      process.stderr.write(`artifice-discord: FleetBus disabled: ${String(error)}\n`)
-      mode = 'primary'
-      heartbeatIntervalMs = undefined
-      supervisorSleepMs = undefined
+      process.stderr.write(
+        `artifice-discord: fatal FleetBus config error (FLEET_BUS_DISABLED=0 was set): ${String(error)}\n`,
+      )
+      process.exit(1)
     }
+    const { mode, heartbeatIntervalMs, supervisorSleepMs } = startupConfig
     // FleetBus is optional: never hold Discord startup behind a network await.
     void (async () => {
       try {

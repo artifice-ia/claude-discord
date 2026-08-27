@@ -342,13 +342,54 @@ export function parseFleetBusMode(raw: string | undefined): FleetBusMode {
   throw new Error(`FLEET_BUS_MODE: expected 'primary' or 'publish-only', got '${raw}'`)
 }
 
+/**
+ * Strict positive-integer env parse. Undefined/empty means "operator left it
+ * unset — use the default." Anything else must be a complete integer literal
+ * with no trailing units or whitespace, or we throw so startup can hard-fail
+ * loudly rather than silently drop half the value (e.g. `Number.parseInt`
+ * happily returns `30` for `'30sec'`). Applied to every numeric FLEET_BUS_*
+ * env this module owns; see [[feedback_class_vs_instance]].
+ */
 export function parseOptionalPositiveInt(raw: string | undefined, name: string): number | undefined {
   if (raw === undefined || raw === '') return undefined
+  // Reject anything that isn't a bare integer literal — no leading/trailing
+  // whitespace, no unit suffix, no decimal point. `parseInt` alone would
+  // partially parse '30sec' → 30 and hide operator typos.
+  if (!/^-?\d+$/.test(raw)) {
+    throw new Error(`${name}: expected an integer, got '${raw}'`)
+  }
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${name}: expected a positive integer, got '${raw}'`)
   }
   return parsed
+}
+
+export interface FleetBusStartupConfig {
+  mode: FleetBusMode
+  heartbeatIntervalMs: number | undefined
+  supervisorSleepMs: number | undefined
+}
+
+/**
+ * Parse the plugin-side fleet-bus startup config from an env source. Throws a
+ * single aggregated Error on any invalid value so server.ts can hard-fail
+ * (exit 1) rather than silently disable the bus when an operator has already
+ * committed to enabling it via `FLEET_BUS_DISABLED=0`. Only the plugin's own
+ * knobs live here — the package owns its own env parsing (rate limits, etc.).
+ */
+export function parseFleetBusStartupConfig(env: NodeJS.ProcessEnv): FleetBusStartupConfig {
+  return {
+    mode: parseFleetBusMode(env.FLEET_BUS_MODE),
+    heartbeatIntervalMs: parseOptionalPositiveInt(
+      env.FLEET_BUS_HEARTBEAT_INTERVAL_MS,
+      'FLEET_BUS_HEARTBEAT_INTERVAL_MS',
+    ),
+    supervisorSleepMs: parseOptionalPositiveInt(
+      env.FLEET_BUS_SUPERVISOR_SLEEP_MS,
+      'FLEET_BUS_SUPERVISOR_SLEEP_MS',
+    ),
+  }
 }
 
 // Re-export the package pieces server.ts needs so the import surface stays

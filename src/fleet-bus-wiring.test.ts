@@ -21,6 +21,7 @@ import {
   buildReplyDisciplineHint,
   CountingBucket,
   parseFleetBusMode,
+  parseFleetBusStartupConfig,
   parseOptionalPositiveInt,
   readAuditTail,
   wrapRateLimiters,
@@ -232,5 +233,88 @@ describe('config parsing', () => {
     expect(() => parseOptionalPositiveInt('0', 'X')).toThrow('X')
     expect(() => parseOptionalPositiveInt('-5', 'X')).toThrow('X')
     expect(() => parseOptionalPositiveInt('nan', 'X')).toThrow('X')
+  })
+
+  test('parseOptionalPositiveInt rejects partially-parseable strings (Number.parseInt trap)', () => {
+    // These are the specific inputs Number.parseInt would silently accept —
+    // e.g. `parseInt('30sec', 10)` returns 30, hiding the operator typo.
+    // Strict regex must catch them all before parseInt sees them.
+    expect(() => parseOptionalPositiveInt('30sec', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS'))
+      .toThrow('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    expect(() => parseOptionalPositiveInt('30 ', 'X')).toThrow('X')
+    expect(() => parseOptionalPositiveInt(' 30', 'X')).toThrow('X')
+    expect(() => parseOptionalPositiveInt('3.14', 'X')).toThrow('X')
+    expect(() => parseOptionalPositiveInt('30ms', 'X')).toThrow('X')
+    expect(() => parseOptionalPositiveInt('0x1e', 'X')).toThrow('X')
+    expect(() => parseOptionalPositiveInt('1e3', 'X')).toThrow('X')
+  })
+
+  test('parseOptionalPositiveInt error message names the variable and quotes the raw input', () => {
+    // Operators debugging a systemd unit want to see BOTH the env var name
+    // and what they actually set — a bare "parse error" would send them
+    // grepping through code.
+    let caught: Error | null = null
+    try {
+      parseOptionalPositiveInt('30sec', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    } catch (err) {
+      caught = err as Error
+    }
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    expect(caught!.message).toContain("'30sec'")
+  })
+})
+
+describe('parseFleetBusStartupConfig', () => {
+  test('returns defaults when no fleet-bus knobs are set', () => {
+    const cfg = parseFleetBusStartupConfig({})
+    expect(cfg.mode).toBe('primary')
+    expect(cfg.heartbeatIntervalMs).toBeUndefined()
+    expect(cfg.supervisorSleepMs).toBeUndefined()
+  })
+
+  test('passes valid overrides through', () => {
+    const cfg = parseFleetBusStartupConfig({
+      FLEET_BUS_MODE: 'publish-only',
+      FLEET_BUS_HEARTBEAT_INTERVAL_MS: '15000',
+      FLEET_BUS_SUPERVISOR_SLEEP_MS: '500',
+    })
+    expect(cfg.mode).toBe('publish-only')
+    expect(cfg.heartbeatIntervalMs).toBe(15000)
+    expect(cfg.supervisorSleepMs).toBe(500)
+  })
+
+  test('throws (server.ts hard-exits) when FLEET_BUS_MODE is garbage', () => {
+    // Mutation witness for P1: prior behavior silently reset mode to
+    // 'primary' and let the bus come up on a config the operator didn't ask
+    // for. server.ts now converts this throw into process.exit(1).
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_MODE: 'derp' })).toThrow('FLEET_BUS_MODE')
+  })
+
+  test('throws when FLEET_BUS_HEARTBEAT_INTERVAL_MS is partially parseable', () => {
+    // The Codex P2 case — '30sec' silently became 30ms under Number.parseInt,
+    // then propagated as a truthy override into the fleet-bus config. Must throw.
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_HEARTBEAT_INTERVAL_MS: '30sec' }))
+      .toThrow('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+  })
+
+  test('throws when FLEET_BUS_SUPERVISOR_SLEEP_MS is partially parseable', () => {
+    // Class-widening: the same trap on the supervisor-sleep knob.
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_SUPERVISOR_SLEEP_MS: '2000ms' }))
+      .toThrow('FLEET_BUS_SUPERVISOR_SLEEP_MS')
+  })
+
+  test('empty-string overrides still count as unset (no throw)', () => {
+    // Distinct from `'0'` or `'30sec'` — empty means the operator explicitly
+    // cleared the var (e.g. a systemd override clearing an inherited value).
+    // Treating it as an error would break the "unset via empty" contract.
+    const cfg = parseFleetBusStartupConfig({
+      FLEET_BUS_MODE: '',
+      FLEET_BUS_HEARTBEAT_INTERVAL_MS: '',
+      FLEET_BUS_SUPERVISOR_SLEEP_MS: '',
+    })
+    expect(cfg.mode).toBe('primary')
+    expect(cfg.heartbeatIntervalMs).toBeUndefined()
+    expect(cfg.supervisorSleepMs).toBeUndefined()
   })
 })
