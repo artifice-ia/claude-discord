@@ -987,9 +987,10 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
           await candidate.stop()
           return
         }
-        // Optimistic — the supervisor loop is single-shot at boot; if the
-        // first connect fails the run() promise catches and flips state.
-        candidate.markConnected()
+        // No eager state flip here — BusRuntime wraps the FleetBus connectFn
+        // so `state` transitions to 'connected' only after nats.js resolves a
+        // live connection. Prior optimistic markConnected() lied about state
+        // during outages (Ohm PR #23 round-3 blocker; closed issue #24).
         fleetBus = candidate
       } catch (error) {
         if (!shuttingDown) {

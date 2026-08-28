@@ -26,7 +26,7 @@ import {
   type FleetBusSessionEvent,
   type TokenBucket,
 } from '@artifice-ia/fleet-bus'
-import type { ConnectionOptions, NatsConnection } from 'nats'
+import { connect as natsConnect, type ConnectionOptions, type NatsConnection } from 'nats'
 
 /* -------------------------------------------------------------------------- */
 /* Counting bucket — proxies a TokenBucket, tallying allow/deny per key so    */
@@ -336,7 +336,24 @@ export function readAuditTail(path: string, limit: number, maxScanBytes = 1_048_
 /* and counters. server.ts owns lifecycle; this owns everything else.         */
 /* -------------------------------------------------------------------------- */
 
-export type BusState = 'disabled' | 'connecting' | 'connected' | 'stopping' | 'error'
+/**
+ * Runtime state for `bus_status.state`. Transitions:
+ *   `starting`   — supervisor kicked off, but the first NATS connect has not
+ *                  yet resolved. Health checks reading this should treat it
+ *                  as "bus not yet usable."
+ *   `connected`  — first `connectFn(...)` call resolved. Set inside a wrapped
+ *                  `connectFn` on the FleetBusConfig so a health check never
+ *                  sees `connected` before nats.js has handed back a live
+ *                  connection. Ohm PR #23 round-3 blocker; see
+ *                  [[feedback_mutation_test_the_controls]].
+ *   `stopping`   — `stop()` fired, or the supervisor loop resolved cleanly.
+ *   `error`      — `bus.run()` unrecoverably rejected. Rare (the supervisor
+ *                  catches per-connect failures and retries), but the branch
+ *                  exists so a genuinely broken supervisor doesn't sit in
+ *                  `starting` forever.
+ *   `disabled`   — reserved for future explicit off state; unused today.
+ */
+export type BusState = 'disabled' | 'starting' | 'connected' | 'stopping' | 'error'
 
 export interface BusRuntimeConfig {
   botName: string
@@ -371,7 +388,7 @@ export class BusRuntime {
   readonly rateLimiters: CountingRateLimiters
   readonly bus: FleetBus
   private supervisorPromise?: Promise<void>
-  state: BusState = 'connecting'
+  state: BusState = 'starting'
   injectionsDelivered = 0
   injectionsFailed = 0
   lastInjectionTs?: string
@@ -409,7 +426,25 @@ export class BusRuntime {
     }
     if (config.heartbeatIntervalMs !== undefined) fleetConfig.heartbeatIntervalMs = config.heartbeatIntervalMs
     if (config.supervisorSleepMs !== undefined) fleetConfig.supervisorSleepMs = config.supervisorSleepMs
-    if (config.connectFn !== undefined) fleetConfig.connectFn = config.connectFn
+
+    // Wrap the connectFn so `state` flips to 'connected' only after nats.js
+    // has actually handed us a live NatsConnection. Previously the plugin
+    // called `markConnected()` right after `start()` returned — but `start()`
+    // just spawns the supervisor loop's promise; the underlying connect can
+    // still be pending or repeatedly failing. Health checks reading
+    // `bus_status.state` saw 'connected' during a full outage (Ohm PR #23
+    // round-3 blocker; issue #24).
+    //
+    // Tests can still inject a fake connect via `config.connectFn` — we wrap
+    // whichever one they provide, or default to `nats.connect`. The wrapper
+    // never touches state on reconnect (stays 'connected'); explicit stop or
+    // an unrecoverable `run()` rejection are what transition it out.
+    const underlyingConnectFn = config.connectFn ?? natsConnect
+    fleetConfig.connectFn = async (options: ConnectionOptions): Promise<NatsConnection> => {
+      const nc = await underlyingConnectFn(options)
+      if (this.state === 'starting') this.state = 'connected'
+      return nc
+    }
 
     this.bus = new FleetBus(fleetConfig, this.allowlist)
   }
@@ -417,6 +452,10 @@ export class BusRuntime {
   /**
    * Kick off the supervisor loop. Never awaits — the loop runs in the
    * background and reconnects across NATS blips until stop() fires.
+   *
+   * `state` transitions are handled by the wrapped `connectFn` (starting
+   * → connected on first live nats.js connection) and by the promise chain
+   * below (→ stopping on clean resolve, → error on unrecoverable reject).
    */
   start(): void {
     this.supervisorPromise = this.bus.run().then(
@@ -429,15 +468,6 @@ export class BusRuntime {
         this.config.logger(`supervisor exited with error: ${String(error)}`)
       },
     )
-    // Nudge state to 'connected' after first successful heartbeat window —
-    // no callback from package yet, so lean on the audit log's 'in' entries
-    // OR check nc state on next tool call. For now, state flips to
-    // 'connected' via markConnected() below, triggered by the plugin either
-    // on its own connect callback OR on first injection. Cheap heuristic.
-  }
-
-  markConnected(): void {
-    if (this.state === 'connecting') this.state = 'connected'
   }
 
   async stop(): Promise<void> {
@@ -481,12 +511,28 @@ export function parseFleetBusMode(raw: string | undefined): FleetBusMode {
 }
 
 /**
+ * Node's setTimeout/setInterval silently coerce delays above INT32_MAX
+ * (2,147,483,647 ms — ~24.85 days) to 1ms. Every current consumer of
+ * `parseOptionalPositiveInt` feeds a `setInterval` (heartbeat, supervisor
+ * sleep), so a fat-fingered `FLEET_BUS_HEARTBEAT_INTERVAL_MS=99999999999`
+ * would heartbeat 1000×/sec — the opposite of the operator's intent. Cap
+ * lives on the parser (class check per [[feedback_class_vs_instance]]) so
+ * every future interval-shaped env inherits it. See Node docs on Timeout
+ * (`Timeout.refresh()` / `setInterval(callback, delay)` clamping).
+ */
+const NODE_SETTIMEOUT_MAX_MS = 2_147_483_647
+
+/**
  * Strict positive-integer env parse. Undefined/empty means "operator left it
  * unset — use the default." Anything else must be a complete integer literal
  * with no trailing units or whitespace, or we throw so startup can hard-fail
  * loudly rather than silently drop half the value (e.g. `Number.parseInt`
  * happily returns `30` for `'30sec'`). Applied to every numeric FLEET_BUS_*
  * env this module owns; see [[feedback_class_vs_instance]].
+ *
+ * Also enforces the Node setTimeout maximum (INT32_MAX ms). Above that,
+ * setInterval silently rewinds to 1ms — so we reject at parse time rather
+ * than ship a supervisor that heartbeats a thousand times a second.
  */
 export function parseOptionalPositiveInt(raw: string | undefined, name: string): number | undefined {
   if (raw === undefined || raw === '') return undefined
@@ -499,6 +545,11 @@ export function parseOptionalPositiveInt(raw: string | undefined, name: string):
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${name}: expected a positive integer, got '${raw}'`)
+  }
+  if (parsed > NODE_SETTIMEOUT_MAX_MS) {
+    throw new Error(
+      `${name}: interval exceeds ${NODE_SETTIMEOUT_MAX_MS} ms (Node setTimeout maximum) — got '${raw}'`,
+    )
   }
   return parsed
 }

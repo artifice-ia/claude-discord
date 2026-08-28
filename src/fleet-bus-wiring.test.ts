@@ -461,6 +461,40 @@ describe('config parsing', () => {
     expect(() => parseOptionalPositiveInt('1e3', 'X')).toThrow('X')
   })
 
+  test('parseOptionalPositiveInt accepts the Node setTimeout maximum (2147483647 ms)', () => {
+    // Boundary — INT32_MAX itself is still a valid delay for
+    // setTimeout/setInterval. Rejecting it would break operators who have
+    // ~24.85-day intervals already committed. Only ABOVE the max is bad.
+    expect(parseOptionalPositiveInt('2147483647', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS')).toBe(2147483647)
+  })
+
+  test('parseOptionalPositiveInt rejects intervals above 2147483647 ms', () => {
+    // Codex round-2 P2 → Ohm PR #23 round-3 blocker (issue #25). Node's
+    // setTimeout/setInterval silently coerce delays above INT32_MAX to 1ms,
+    // so a fat-fingered FLEET_BUS_HEARTBEAT_INTERVAL_MS=99999999999 would
+    // heartbeat 1000x/sec instead of ~once/year. Fail loud at parse time.
+    expect(() => parseOptionalPositiveInt('2147483648', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS'))
+      .toThrow('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    expect(() => parseOptionalPositiveInt('99999999999', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS'))
+      .toThrow('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+  })
+
+  test('parseOptionalPositiveInt max-error message names the ceiling and quotes the raw input', () => {
+    // Operators grepping systemd journal want to see BOTH the specific max
+    // (2147483647) and the value they set, so the misconfig is actionable
+    // without opening source. Guards against a diagnostic regression.
+    let caught: Error | null = null
+    try {
+      parseOptionalPositiveInt('2147483648', 'FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    } catch (err) {
+      caught = err as Error
+    }
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('2147483647')
+    expect(caught!.message).toContain("'2147483648'")
+    expect(caught!.message).toContain('Node setTimeout maximum')
+  })
+
   test('parseOptionalPositiveInt error message names the variable and quotes the raw input', () => {
     // Operators debugging a systemd unit want to see BOTH the env var name
     // and what they actually set — a bare "parse error" would send them
@@ -514,6 +548,25 @@ describe('parseFleetBusStartupConfig', () => {
     // Class-widening: the same trap on the supervisor-sleep knob.
     expect(() => parseFleetBusStartupConfig({ FLEET_BUS_SUPERVISOR_SLEEP_MS: '2000ms' }))
       .toThrow('FLEET_BUS_SUPERVISOR_SLEEP_MS')
+  })
+
+  test('INT32_MAX ceiling applies to every parseOptionalPositiveInt consumer (class check)', () => {
+    // The Node-setTimeout ceiling lives on the parser itself — every current
+    // and future FLEET_BUS_*_MS knob inherits it via parseOptionalPositiveInt.
+    // Codex round-2 P2 → Ohm PR #23 round-3 blocker (issue #25).
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_HEARTBEAT_INTERVAL_MS: '2147483648' }))
+      .toThrow('FLEET_BUS_HEARTBEAT_INTERVAL_MS')
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_SUPERVISOR_SLEEP_MS: '2147483648' }))
+      .toThrow('FLEET_BUS_SUPERVISOR_SLEEP_MS')
+    // Mutation witness the boundary — INT32_MAX itself must still pass end
+    // to end, otherwise operators with a max-delay committed regress on
+    // upgrade.
+    const cfg = parseFleetBusStartupConfig({
+      FLEET_BUS_HEARTBEAT_INTERVAL_MS: '2147483647',
+      FLEET_BUS_SUPERVISOR_SLEEP_MS: '2147483647',
+    })
+    expect(cfg.heartbeatIntervalMs).toBe(2147483647)
+    expect(cfg.supervisorSleepMs).toBe(2147483647)
   })
 
   test('empty-string overrides still count as unset (no throw)', () => {

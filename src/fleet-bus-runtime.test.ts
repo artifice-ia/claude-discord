@@ -106,6 +106,20 @@ function writeManifest(path: string, names: string[]): void {
   writeFileSync(path, `version: 1\nbot_names:\n${names.map(n => `  - ${n}`).join('\n')}\n`)
 }
 
+/**
+ * Poll-until — time-bounded wait for a boolean predicate. Used instead of a
+ * fixed `setTimeout` so a genuine regression fails the test quickly (the
+ * timeout expires) rather than hiding behind a padded sleep.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 500, intervalMs = 5): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(r => setTimeout(r, intervalMs))
+  }
+  if (!predicate()) throw new Error(`waitFor: predicate never became true within ${timeoutMs}ms`)
+}
+
 function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, auditLogPath: string): BusRuntimeConfig {
   return {
     botName: 'luna',
@@ -204,10 +218,16 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-runtime-'))
     const manifestPath = join(dir, 'manifest.yaml')
     writeManifest(manifestPath, ['luna'])
+    const nc = new FakeNatsConnection()
     const runtime = new BusRuntime(
-      makeConfig({ mode: 'publish-only' }, manifestPath, join(dir, 'audit.jsonl')),
+      makeConfig(
+        { mode: 'publish-only', connectFn: async () => nc as unknown as NatsConnection },
+        manifestPath,
+        join(dir, 'audit.jsonl'),
+      ),
     )
-    runtime.markConnected()
+    runtime.start()
+    await waitFor(() => runtime.state === 'connected')
     const snap = runtime.statusSnapshot()
     expect(snap.state).toBe('connected')
     expect(snap.mode).toBe('publish-only')
@@ -219,6 +239,95 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
     expect(rl.per_from).toBeTruthy()
     expect(rl.per_subject).toBeTruthy()
     expect(rl.per_session_inject).toBeTruthy()
+    await runtime.stop()
+  })
+
+  test('state stays "starting" while connectFn is pending — no eager flip', async () => {
+    // Mutation witness for Ohm PR #23 round-3 blocker + issue #24. Prior
+    // behavior called `markConnected()` right after `start()` returned, so
+    // `bus_status.state` reported 'connected' before nats.js had actually
+    // handed the runtime a live NatsConnection. A health check reading
+    // bus_status during a full outage saw green. Now the state transitions
+    // are driven from inside a wrapped connectFn — proof it's still
+    // 'starting' while that promise is pending.
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-runtime-'))
+    const manifestPath = join(dir, 'manifest.yaml')
+    writeManifest(manifestPath, ['luna'])
+    let release: () => void = () => {}
+    const gate = new Promise<void>(r => { release = r })
+    const runtime = new BusRuntime(
+      makeConfig(
+        {
+          connectFn: async () => {
+            await gate
+            return new FakeNatsConnection() as unknown as NatsConnection
+          },
+        },
+        manifestPath,
+        join(dir, 'audit.jsonl'),
+      ),
+    )
+    // Before start(): still 'starting' — the initial state, not 'connected'.
+    expect(runtime.state).toBe('starting')
+    runtime.start()
+    // Give the microtask queue a chance to run the supervisor loop's first
+    // tick. The connect promise is still pending, so state must not flip.
+    await new Promise(r => setTimeout(r, 20))
+    expect(runtime.state).toBe('starting')
+    expect(runtime.statusSnapshot().state).toBe('starting')
+    // Release the gate — connect resolves, state must now flip.
+    release()
+    await waitFor(() => runtime.state === 'connected')
+    expect(runtime.state).toBe('connected')
+    await runtime.stop()
+  })
+
+  test('state flips to "connected" only after connectFn resolves', async () => {
+    // Positive path — the state DOES transition once the connection is up.
+    // Pairs with the "state stays starting" test to prove BOTH sides of the
+    // conditional in the wrapped connectFn.
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-runtime-'))
+    const manifestPath = join(dir, 'manifest.yaml')
+    writeManifest(manifestPath, ['luna'])
+    const nc = new FakeNatsConnection()
+    const runtime = new BusRuntime(
+      makeConfig(
+        { connectFn: async () => nc as unknown as NatsConnection },
+        manifestPath,
+        join(dir, 'audit.jsonl'),
+      ),
+    )
+    expect(runtime.state).toBe('starting')
+    runtime.start()
+    await waitFor(() => runtime.state === 'connected')
+    expect(runtime.state).toBe('connected')
+    // Heartbeat should have been published at least once too — sanity that
+    // the state flip lines up with observable transport activity.
+    await waitFor(() => nc.publishes.some(p => p.subject === 'fleet.luna.status'))
+    await runtime.stop()
+  })
+
+  test('state flips to "error" if bus.run() rejects unrecoverably', async () => {
+    // Mutation witness for the error branch on the supervisor promise. The
+    // package's `run()` normally catches per-connect failures and retries, so
+    // this branch fires only for genuinely broken supervisor state — but the
+    // handler must exist so we don't sit in 'starting' forever if it does.
+    // Removing the `error =>` handler in BusRuntime.start() flips this test
+    // to red (state stuck at 'starting', timeout in waitFor).
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-runtime-'))
+    const manifestPath = join(dir, 'manifest.yaml')
+    writeManifest(manifestPath, ['luna'])
+    const runtime = new BusRuntime(
+      makeConfig({}, manifestPath, join(dir, 'audit.jsonl')),
+    )
+    // Force run() to reject deterministically without touching transport.
+    runtime.bus.run = async () => { throw new Error('boom: supervisor exploded') }
+    runtime.start()
+    await waitFor(() => runtime.state === 'error')
+    expect(runtime.state).toBe('error')
+    expect(runtime.lastError ?? '').toContain('boom: supervisor exploded')
+    expect(runtime.statusSnapshot().state).toBe('error')
+    await runtime.stop()
   })
 
   test('publish-only mode skips subscriptions AND heartbeat', async () => {
