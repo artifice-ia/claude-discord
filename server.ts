@@ -36,7 +36,17 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { VoiceManager, requiredVoiceUserId, voiceUserName } from './voice'
-import { buildFleetBusFrameMeta, FleetBus, loadFleetManifestAllowlist, normalizeBotName } from './src/fleet-bus'
+import {
+  BusRuntime,
+  appendReplyHint,
+  buildReplyHint,
+  loadFleetManifestAllowlist,
+  normalizeBotName,
+  parseFleetBusStartupConfig,
+  parseFleetPeerRuntimes,
+  readAuditTail,
+  type BusRuntimeConfig,
+} from './src/fleet-bus-wiring'
 import packageJson from './package.json' with { type: 'json' }
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
@@ -656,6 +666,61 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['channel'],
       },
     },
+    {
+      name: 'bus_request',
+      description:
+        "Publish an envelope on the fleet bus and optionally wait for a `.result` reply. `to` and `kind` are validated on the wire; `payload` MUST be JSON-serializable (no undefined/functions/NaN). If `wait: true` (default false), returns the reply envelope when it arrives or `timed_out: true` after `timeout_ms` (default 30000). For `kind: 'text_message'` the plugin default-appends an adapter-aware reply-discipline hint routed by recipient runtime (codex-container peers get a `<BUS>` extract hint; Claude Code peers get a `bus_reply` MCP-tool hint; unknown recipients get a protocol-neutral hint). Disable with `payload_wrap_hint: false`. To continue a request→reply chain (baton lineage), use `bus_reply(req_id, ...)` from the inbound frame — this handler always originates a fresh request. Refuses with `multi_instance_publish_only` when FLEET_BUS_MODE=publish-only AND wait=true.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: 'Canonical recipient bot name (e.g. "vec"). Rejected if not in the fleet manifest.' },
+          kind: { type: 'string', description: "Envelope kind, e.g. 'text_message', 'pr_review_request', 'baton.start'." },
+          payload: { description: 'JSON-serializable envelope body.' },
+          wait: { type: 'boolean', description: 'Block until a `.result` reply arrives; default false (fire-and-forget).' },
+          timeout_ms: { type: 'number', description: 'Only meaningful when wait=true; default 30000.' },
+          force: { type: 'boolean', description: 'Reserved — bypass caller-side rate discipline. Peer-side rate limits still apply.' },
+          payload_wrap_hint: {
+            type: 'boolean',
+            description: "Default true for `kind: 'text_message'`: append an adapter-aware bus reply-discipline hint to the peer. Set false to send verbatim.",
+          },
+        },
+        required: ['to', 'kind', 'payload'],
+      },
+    },
+    {
+      name: 'bus_reply',
+      description:
+        "Publish a `.result` reply to an inbound bus envelope. `req_id` is the local reply nonce from the inbound <channel source='fleet-bus' req_id='...'> frame. `payload` MUST be JSON-serializable. `kind` defaults to 'result' (SPEC §6). Refuses with `req_id_unknown` if the ledger has already evicted the request, or `multi_instance_publish_only` under FLEET_BUS_MODE=publish-only.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          req_id: { type: 'string', description: "The req_id from an inbound <channel source='fleet-bus'> frame." },
+          payload: { description: 'JSON-serializable reply body.' },
+          kind: { type: 'string', description: "Reply kind; default 'result'." },
+        },
+        required: ['req_id', 'payload'],
+      },
+    },
+    {
+      name: 'bus_status',
+      description:
+        "Fleet-bus runtime state: connection, mode, manifest size, injection counters, last error, and rate-limit pressure (per_from / per_subject / per_session_inject: allowed / denied / top denials). Returns `{ enabled: false }` when FLEET_BUS_DISABLED != '0'.",
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'bus_history',
+      description:
+        'Read recent fleet-bus audit entries (inbound accepted, outbound published, drops with reason). Returns oldest→newest. Backed by the audit JSONL file at FLEET_BUS_AUDIT_LOG_PATH; last ~1MB is scanned per call. Use `limit` to bound (default 20, max 200).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max entries to return (default 20, capped at 200).' },
+        },
+      },
+    },
   ],
 }))
 
@@ -769,6 +834,61 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           content: [{ type: 'text', text: `downloaded ${lines.length} attachment(s):\n${lines.join('\n')}` }],
         }
       }
+      case 'bus_request': {
+        if (!fleetBus) {
+          return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
+        }
+        const to = args.to as string
+        const kind = args.kind as string
+        let payload = args.payload
+        const wait = args.wait === true
+        const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined
+        const force = args.force === true
+        const wrapHint = args.payload_wrap_hint !== false // default true
+        // text_message ergonomic — appended BEFORE publish so the peer sees
+        // the hint on the wire. Skip when the caller explicitly opts out or
+        // sends a non-text_message kind. Hint text is adapter-aware: codex
+        // peers get the <BUS> extract hint, Claude peers get the bus_reply
+        // MCP-tool hint, unknown recipients get a protocol-neutral hint.
+        // See PR #23 Ohm round-2 P1.
+        if (wrapHint && kind === 'text_message') {
+          const { hint } = buildReplyHint({
+            recipientBot: to,
+            senderBot: fleetBus.config.botName,
+            codexBots: fleetBus.config.codexBots,
+            claudeBots: fleetBus.config.claudeBots,
+          })
+          payload = appendReplyHint(payload, hint)
+        }
+        const result = await fleetBus.bus.request({ to, kind, payload, wait, timeoutMs, force })
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+      }
+      case 'bus_reply': {
+        if (!fleetBus) {
+          return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
+        }
+        const reqId = args.req_id as string
+        const payload = args.payload
+        const kind = typeof args.kind === 'string' ? (args.kind as string) : 'result'
+        const result = fleetBus.bus.publishReply(reqId, payload, kind)
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+      }
+      case 'bus_status': {
+        if (!fleetBus) {
+          return { content: [{ type: 'text', text: JSON.stringify({ enabled: false }, null, 2) }] }
+        }
+        const snapshot = fleetBus.statusSnapshot()
+        return { content: [{ type: 'text', text: JSON.stringify({ enabled: true, ...snapshot }, null, 2) }] }
+      }
+      case 'bus_history': {
+        if (!fleetBus) {
+          return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
+        }
+        const limitRaw = typeof args.limit === 'number' ? args.limit : 20
+        const limit = Math.max(1, Math.min(limitRaw, 200))
+        const entries = readAuditTail(fleetBus.config.auditLogPath, limit)
+        return { content: [{ type: 'text', text: JSON.stringify({ count: entries.length, entries }, null, 2) }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -786,7 +906,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
-let fleetBus: FleetBus | undefined
+let fleetBus: BusRuntime | undefined
 
 // Register teardown before any optional network await. stdin EOF is not
 // replayed, so registering after a slow NATS connect can leave a zombie.
@@ -799,7 +919,7 @@ function shutdown(): void {
   setTimeout(() => process.exit(0), 2000)
   void Promise.allSettled([
     Promise.resolve(client.destroy()),
-    fleetBus?.disconnect() ?? Promise.resolve(),
+    fleetBus?.stop() ?? Promise.resolve(),
   ]).finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
@@ -807,43 +927,70 @@ process.stdin.on('close', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 
+// Stage 4: FleetBus runs under a supervisor loop that reconnects across
+// NATS blips (SPEC §1.7 fix). server.ts stays out of transport concerns —
+// all state, counters, and injection-frame construction lives in the
+// BusRuntime helper. Config knobs: FLEET_BUS_* env vars (see README).
 if (process.env.FLEET_BUS_DISABLED === '0') {
   const botName = normalizeBotName(process.env.FLEET_BUS_USER ?? readPersonaName())
   if (!botName) {
     process.stderr.write('artifice-discord: FleetBus disabled: FLEET_BUS_USER or persona name is invalid\n')
   } else {
     const tokenPath = process.env.FLEET_BUS_TOKEN_FILE ?? join(homedir(), '.claude', `fleet-bus-token-${botName}`)
+    // FLEET_BUS_DISABLED=0 is an explicit opt-in — a garbled FLEET_BUS_MODE or
+    // FLEET_BUS_HEARTBEAT_INTERVAL_MS at this point is a misconfiguration the
+    // operator wants to hear about, not a silent bus-disable. Hard-exit so the
+    // wrapper (systemd / compose) surfaces the failure loudly.
+    let startupConfig: ReturnType<typeof parseFleetBusStartupConfig>
+    try {
+      startupConfig = parseFleetBusStartupConfig(process.env)
+    } catch (error) {
+      process.stderr.write(
+        `artifice-discord: fatal FleetBus config error (FLEET_BUS_DISABLED=0 was set): ${String(error)}\n`,
+      )
+      process.exit(1)
+    }
+    const { mode, heartbeatIntervalMs, supervisorSleepMs } = startupConfig
+    const peerRuntimes = parseFleetPeerRuntimes(process.env)
     // FleetBus is optional: never hold Discord startup behind a network await.
     void (async () => {
       try {
         const password = readFileSync(tokenPath, 'utf8').trim()
         if (!password) throw new Error('token file is empty')
-        const candidate = new FleetBus({
+        const runtimeConfig: BusRuntimeConfig = {
           botName,
-          user: botName,
           password,
           url: process.env.FLEET_BUS_URL ?? 'nats://127.0.0.1:4222',
-          subscribeBroadcast: process.env.FLEET_BUS_SUBSCRIBE_BROADCAST === '1',
+          mode,
           pluginVersion: packageJson.version,
-          logger: message => process.stderr.write(`artifice-discord: ${message}\n`),
+          manifestPath: process.env.FLEET_BUS_MANIFEST_PATH ?? join(homedir(), 'vault', 'infra', 'fleet-manifest.yaml'),
           auditLogPath: process.env.FLEET_BUS_AUDIT_LOG_PATH ?? join(homedir(), '.claude', 'fleet-bus-log.jsonl'),
-          injectIntoSession: async event => {
+          subscribeBroadcast: process.env.FLEET_BUS_SUBSCRIBE_BROADCAST === '1',
+          heartbeatIntervalMs,
+          supervisorSleepMs,
+          codexBots: peerRuntimes.codexBots,
+          claudeBots: peerRuntimes.claudeBots,
+          logger: message => process.stderr.write(`artifice-discord: ${message}\n`),
+          injectIntoSession: async (frame, _event) => {
             await mcp.notification({
               method: 'notifications/claude/channel',
               params: {
-                content: `<payload>${JSON.stringify(event.envelope.payload)}</payload>`,
-                meta: buildFleetBusFrameMeta(event),
+                content: frame.content,
+                meta: frame.meta,
               },
             })
           },
-        }, loadFleetManifestAllowlist(
-          process.env.FLEET_BUS_MANIFEST_PATH ?? join(homedir(), 'vault', 'infra', 'fleet-manifest.yaml'),
-        ))
-        await candidate.connect()
+        }
+        const candidate = new BusRuntime(runtimeConfig)
+        candidate.start()
         if (shuttingDown) {
-          await candidate.disconnect()
+          await candidate.stop()
           return
         }
+        // No eager state flip here — BusRuntime wraps the FleetBus connectFn
+        // so `state` transitions to 'connected' only after nats.js resolves a
+        // live connection. Prior optimistic markConnected() lied about state
+        // during outages (Ohm PR #23 round-3 blocker; closed issue #24).
         fleetBus = candidate
       } catch (error) {
         if (!shuttingDown) {

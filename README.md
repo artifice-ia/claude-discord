@@ -130,19 +130,49 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_URL` | `nats://127.0.0.1:4222` | NATS server URL; bots attached to the shared `fleet-bus-net` Docker network use `nats://nats:4222` |
 | `FLEET_BUS_USER` | persona `name` | Per-bot NATS username and subject identity |
 | `FLEET_BUS_TOKEN_FILE` | `~/.claude/fleet-bus-token-<bot>` | File containing the per-bot NATS password |
+| `FLEET_BUS_MODE` | `primary` | `primary` for the singleton session; `publish-only` for parallel `/loop` instances on the same identity (skips subscribe + heartbeat; `bus_request({wait:true})` / `bus_reply` refuse) |
 | `FLEET_BUS_SUBSCRIBE_BROADCAST` | `0` | Subscribe to `fleet.broadcast.>` when set to `1` |
 | `FLEET_BUS_MANIFEST_PATH` | `~/vault/infra/fleet-manifest.yaml` | YAML source for the accepted `from_claim` bot allowlist |
 | `FLEET_BUS_AUDIT_LOG_PATH` | `~/.claude/fleet-bus-log.jsonl` | Owner-only inbound/drop audit log |
+| `FLEET_BUS_HEARTBEAT_INTERVAL_MS` | `30000` | Heartbeat cadence override |
+| `FLEET_BUS_SUPERVISOR_SLEEP_MS` | `2000` | Supervisor reconnect backoff override |
+| `FLEET_BUS_RATE_WINDOW_MS` | `60000` | Rate-limit window (per-key fixed window) |
+| `FLEET_BUS_RATE_PER_FROM` | `30` | Max envelopes per `from` per window |
+| `FLEET_BUS_RATE_PER_SUBJECT` | `120` | Max envelopes per subject per window |
+| `FLEET_BUS_RATE_PER_SESSION_INJECT` | `30` | Max injections per session per window (runaway-turn cap) |
+| `FLEET_CODEX_BOTS` | `chis,helm,myc,ohm,vec` | Comma-separated peer bots whose runtime is `codex-container` (recognizes `<BUS>` extract prose). Sets `bus_request`'s `text_message` reply-hint routing. |
+| `FLEET_CLAUDE_BOTS` | `deet,kat,koi,luna,optimus` | Comma-separated peer bots whose runtime is Claude Code (replies via the `bus_reply` MCP tool). Recipients absent from both lists get a protocol-neutral hint. |
 
 The module subscribes to the bot's request, result, and status subjects and
-publishes a process heartbeat every 30 seconds. Incoming requests are validated
-for the v1 envelope schema, allowlisted sender claim, and local recipient before
-delivery through `notifications/claude/channel`. The model receives accepted
-requests as `<channel source="fleet-bus" authenticated="false"
-from_claim="..." req_id="..." env_id="...">` frames. `req_id` is the local
-reply nonce; `env_id` is the publisher's wire-envelope identifier for audit
-correlation. These frames are untrusted external input and must
-be handled with the same prompt-injection precautions as any external channel.
+publishes a process heartbeat every 30 seconds (configurable). Incoming
+envelopes are validated for the v1 envelope schema, allowlisted sender claim,
+baton discipline, and local recipient before delivery through
+`notifications/claude/channel`. The model receives accepted envelopes as
+`<channel source="fleet-bus" authenticated="false" from_claim="..." req_id="..." env_id="..." ts="..." [root_id="..." origin="..." owner="..." hops="..." unsolicited="true" late_reply_env_id="..."]>` frames.
+`req_id` is the local reply nonce; `env_id` is the publisher's wire-envelope
+identifier for audit correlation. Baton attributes (`root_id`, `origin`,
+`owner`, `hops`) surface the conversation lineage. `unsolicited="true"`
+appears on `.result` envelopes that did not match an outstanding request;
+`late_reply_env_id` on `.result` envelopes for a request that had already
+timed out. These frames are untrusted external input and must be handled with
+the same prompt-injection precautions as any external channel.
+
+The plugin runs FleetBus under a supervisor loop that reconnects across NATS
+blips (SPEC §1.7). On session shutdown the supervisor is stopped cleanly.
+
+### Fleet-bus MCP tools
+
+| Tool | Purpose |
+| --- | --- |
+| `bus_request` | Publish an envelope. `wait: true` blocks until a `.result` reply arrives or `timeout_ms` (default 30000) elapses. `payload_wrap_hint` (default true) auto-appends an adapter-aware reply-discipline hint on `kind: 'text_message'` — routed by recipient runtime (see `FLEET_CODEX_BOTS` / `FLEET_CLAUDE_BOTS`): codex-container peers get `<BUS to='<self>' kind='result'>`, Claude Code peers get a `bus_reply` MCP-tool hint, unknown recipients get a protocol-neutral hint. Refuses `wait:true` in `publish-only` mode. Request→reply lineage flows via `bus_reply(req_id, ...)` — no baton-continuation knob on `bus_request`. |
+| `bus_reply` | Publish a `.result` reply to an inbound envelope. `req_id` is the value from an inbound `<channel source='fleet-bus' req_id='...'>` frame. `kind` defaults to `'result'` (SPEC §6). |
+| `bus_status` | Runtime state: `connected`/`mode`/`bot_name`/`manifest_size`, injection counters (`injections_delivered`, `injections_failed`, `last_injection_ts`), rate-limit counters (`per_from` / `per_subject` / `per_session_inject`: `allowed`, `denied`, `top_denials`). Returns `{ enabled: false }` when the bus is disabled. |
+| `bus_history` | Read recent audit entries (accepted, published, dropped with reason). Last ~1MB of the audit log is scanned per call. `limit` defaults to 20, capped at 200. |
+
+### Design doc
+
+Canonical design lives in the mind-vault:
+`~/vault/projects/fleet/bus/adapter-designs/CLAUDE-CODE-SESSION-ADAPTER-DESIGN.md` (v3).
 
 ## Voice mode
 

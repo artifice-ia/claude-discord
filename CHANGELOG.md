@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 - 2026-08-27
+- Wire `@artifice-ia/fleet-bus@0.2.0` (`bazfer/fleet-bus` at 71c2c6c) — Stage 4 adapter work per `~/vault/projects/fleet/bus/adapter-designs/CLAUDE-CODE-SESSION-ADAPTER-DESIGN.md` (v3).
+- Replace stub `FleetBus.connect()` with the package's supervisor loop (`bus.run()` / `bus.stop()`); reconnects across NATS blips (SPEC §1.7).
+- Add four MCP tools for bus-side reasoning: `bus_request`, `bus_reply`, `bus_status`, `bus_history`.
+- Injection frame now surfaces baton lineage (`root_id`, `origin`, `owner`, `hops`), `unsolicited="true"` on ledger-unmatched `.result`, and `late_reply_env_id` on evicted-request replies. Payload body uses the package's 8KB cap + XML escape.
+- New env knobs: `FLEET_BUS_MODE` (`primary` / `publish-only`), `FLEET_BUS_HEARTBEAT_INTERVAL_MS`, `FLEET_BUS_SUPERVISOR_SLEEP_MS`, plus the package's `FLEET_BUS_RATE_*` overrides.
+- `bus_request` default-appends an adapter-aware reply-discipline hint on `kind: 'text_message'` — routed by recipient runtime. Codex-container peers get the `<BUS to='<self>' kind='result'>` extract hint; Claude Code peers get a `bus_reply` MCP-tool hint; unknown recipients get a protocol-neutral hint. Peer sets are env-overridable via `FLEET_CODEX_BOTS` and `FLEET_CLAUDE_BOTS` (comma-separated). Disable with `payload_wrap_hint: false`.
+- Removed the `in_reply_to_env_id` bus_request parameter (Ohm PR #23 round-2 P1, Option B). The handler previously accepted it and logged to stderr while still originating a fresh request — a false-success contract violation. Request→reply lineage now flows exclusively through `bus_reply(req_id, ...)`. Follow-up issue tracks Option A (package receive-ledger accessor for wire-id lookup).
+- `bus_status.state` reports `'connected'` only after the wrapped `connectFn` resolves a live NATS connection — prior behavior flipped to `'connected'` eagerly right after `start()` returned, so health checks saw green during a full outage (Ohm PR #23 round-3 blocker, closed issue #24). Initial state renamed `connecting` → `starting`.
+- `parseOptionalPositiveInt` now rejects interval values above INT32_MAX (2,147,483,647 ms — Node's setTimeout ceiling). Above the ceiling, Node silently coerces the delay to 1ms, so `FLEET_BUS_HEARTBEAT_INTERVAL_MS=99999999999` would heartbeat 1000×/sec instead of ~once/year. Class check on the parser — every current and future `FLEET_BUS_*_MS` env inherits it (Ohm PR #23 round-3 blocker, closed issue #25).
+- Version bump 0.5.0 → 0.7.0 (subsumes the deferred #22 refactor which swapped local Stage 1+2 for the packaged import).
+
 ## 0.2.8 - 2026-07-14
 - `stop-context-tracker.js`: resolve context window per model instead of assuming 200K. Maps Opus 4.6/4.7/4.8, Sonnet 4.6/5, and Fable 5 to their real 1M windows; Opus 4.5, Haiku 4.5, and unknown models fall back to 200K. Honors `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` and clamps 1M to 200K when `ANTHROPIC_BASE_URL` is set (gateway can't advertise 1M unless the `sonnet[1m]` alias is picked). Fixes the >100% ctx numbers Deet was reporting on Opus 4.7.
 
