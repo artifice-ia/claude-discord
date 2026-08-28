@@ -38,11 +38,13 @@ import { join, sep } from 'path'
 import { VoiceManager, requiredVoiceUserId, voiceUserName } from './voice'
 import {
   BusRuntime,
+  appendReplyHint,
+  buildReplyHint,
   loadFleetManifestAllowlist,
   normalizeBotName,
   parseFleetBusStartupConfig,
+  parseFleetPeerRuntimes,
   readAuditTail,
-  appendReplyDisciplineHint,
   type BusRuntimeConfig,
 } from './src/fleet-bus-wiring'
 import packageJson from './package.json' with { type: 'json' }
@@ -667,7 +669,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'bus_request',
       description:
-        "Publish an envelope on the fleet bus and optionally wait for a `.result` reply. `to` and `kind` are validated on the wire; `payload` MUST be JSON-serializable (no undefined/functions/NaN). If `wait: true` (default false), returns the reply envelope when it arrives or `timed_out: true` after `timeout_ms` (default 30000). For `kind: 'text_message'` calls the plugin default-appends a reply-discipline hint so codex-container peers wrap their reply in <BUS>; disable with `payload_wrap_hint: false`. Refuses with `multi_instance_publish_only` when FLEET_BUS_MODE=publish-only AND wait=true.",
+        "Publish an envelope on the fleet bus and optionally wait for a `.result` reply. `to` and `kind` are validated on the wire; `payload` MUST be JSON-serializable (no undefined/functions/NaN). If `wait: true` (default false), returns the reply envelope when it arrives or `timed_out: true` after `timeout_ms` (default 30000). For `kind: 'text_message'` the plugin default-appends an adapter-aware reply-discipline hint routed by recipient runtime (codex-container peers get a `<BUS>` extract hint; Claude Code peers get a `bus_reply` MCP-tool hint; unknown recipients get a protocol-neutral hint). Disable with `payload_wrap_hint: false`. To continue a request→reply chain (baton lineage), use `bus_reply(req_id, ...)` from the inbound frame — this handler always originates a fresh request. Refuses with `multi_instance_publish_only` when FLEET_BUS_MODE=publish-only AND wait=true.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -679,11 +681,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           force: { type: 'boolean', description: 'Reserved — bypass caller-side rate discipline. Peer-side rate limits still apply.' },
           payload_wrap_hint: {
             type: 'boolean',
-            description: "Default true for `kind: 'text_message'`: append a bus reply-discipline hint to the peer. Set false to send verbatim.",
-          },
-          in_reply_to_env_id: {
-            type: 'string',
-            description: 'Optional wire envelope id of a request whose reply this publish continues (baton lineage). Use the env_id from an inbound <channel> frame.',
+            description: "Default true for `kind: 'text_message'`: append an adapter-aware bus reply-discipline hint to the peer. Set false to send verbatim.",
           },
         },
         required: ['to', 'kind', 'payload'],
@@ -847,29 +845,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined
         const force = args.force === true
         const wrapHint = args.payload_wrap_hint !== false // default true
-        const inReplyToEnvId = args.in_reply_to_env_id as string | undefined
         // text_message ergonomic — appended BEFORE publish so the peer sees
         // the hint on the wire. Skip when the caller explicitly opts out or
-        // sends a non-text_message kind.
+        // sends a non-text_message kind. Hint text is adapter-aware: codex
+        // peers get the <BUS> extract hint, Claude peers get the bus_reply
+        // MCP-tool hint, unknown recipients get a protocol-neutral hint.
+        // See PR #23 Ohm round-2 P1.
         if (wrapHint && kind === 'text_message') {
-          payload = appendReplyDisciplineHint(payload, fleetBus.config.botName)
-        }
-        // Baton lineage: if the caller passes an in_reply_to_env_id, look up
-        // the inbound envelope in the receive ledger (available via the
-        // package's publishReply path) — but request() also takes an `inbound`
-        // envelope for baton derivation. We don't have direct receive-ledger
-        // read access from the plugin, so this path only sets the wire ID
-        // as `in_reply_to` via a synthetic minimal envelope shape. Deferred
-        // to a package method: leaving inbound undefined here means the
-        // envelope originates a new baton (root_id = own env id). Callers
-        // that need reply-continuation should use bus_reply instead.
-        if (inReplyToEnvId !== undefined) {
-          // We don't inject a synthetic envelope — that would forge baton
-          // fields from unknown wire values. Leave a clear note for the
-          // model instead.
-          process.stderr.write(
-            `artifice-discord: bus_request in_reply_to_env_id is not yet wired to package receive-ledger; use bus_reply for correlated replies\n`,
-          )
+          const { hint } = buildReplyHint({
+            recipientBot: to,
+            senderBot: fleetBus.config.botName,
+            codexBots: fleetBus.config.codexBots,
+            claudeBots: fleetBus.config.claudeBots,
+          })
+          payload = appendReplyHint(payload, hint)
         }
         const result = await fleetBus.bus.request({ to, kind, payload, wait, timeoutMs, force })
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
@@ -962,6 +951,7 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
       process.exit(1)
     }
     const { mode, heartbeatIntervalMs, supervisorSleepMs } = startupConfig
+    const peerRuntimes = parseFleetPeerRuntimes(process.env)
     // FleetBus is optional: never hold Discord startup behind a network await.
     void (async () => {
       try {
@@ -978,6 +968,8 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
           subscribeBroadcast: process.env.FLEET_BUS_SUBSCRIBE_BROADCAST === '1',
           heartbeatIntervalMs,
           supervisorSleepMs,
+          codexBots: peerRuntimes.codexBots,
+          claudeBots: peerRuntimes.claudeBots,
           logger: message => process.stderr.write(`artifice-discord: ${message}\n`),
           injectIntoSession: async (frame, _event) => {
             await mcp.notification({

@@ -140,6 +140,8 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_RATE_PER_FROM` | `30` | Max envelopes per `from` per window |
 | `FLEET_BUS_RATE_PER_SUBJECT` | `120` | Max envelopes per subject per window |
 | `FLEET_BUS_RATE_PER_SESSION_INJECT` | `30` | Max injections per session per window (runaway-turn cap) |
+| `FLEET_CODEX_BOTS` | `chis,helm,myc,ohm,vec` | Comma-separated peer bots whose runtime is `codex-container` (recognizes `<BUS>` extract prose). Sets `bus_request`'s `text_message` reply-hint routing. |
+| `FLEET_CLAUDE_BOTS` | `deet,kat,koi,luna,optimus` | Comma-separated peer bots whose runtime is Claude Code (replies via the `bus_reply` MCP tool). Recipients absent from both lists get a protocol-neutral hint. |
 
 The module subscribes to the bot's request, result, and status subjects and
 publishes a process heartbeat every 30 seconds (configurable). Incoming
@@ -162,7 +164,7 @@ blips (SPEC §1.7). On session shutdown the supervisor is stopped cleanly.
 
 | Tool | Purpose |
 | --- | --- |
-| `bus_request` | Publish an envelope. `wait: true` blocks until a `.result` reply arrives or `timeout_ms` (default 30000) elapses. `payload_wrap_hint` (default true) auto-appends a reply-discipline hint on `kind: 'text_message'` so codex-container peers wrap their reply in `<BUS to='<self>' kind='result'>`. Refuses `wait:true` in `publish-only` mode. |
+| `bus_request` | Publish an envelope. `wait: true` blocks until a `.result` reply arrives or `timeout_ms` (default 30000) elapses. `payload_wrap_hint` (default true) auto-appends an adapter-aware reply-discipline hint on `kind: 'text_message'` — routed by recipient runtime (see `FLEET_CODEX_BOTS` / `FLEET_CLAUDE_BOTS`): codex-container peers get `<BUS to='<self>' kind='result'>`, Claude Code peers get a `bus_reply` MCP-tool hint, unknown recipients get a protocol-neutral hint. Refuses `wait:true` in `publish-only` mode. Request→reply lineage flows via `bus_reply(req_id, ...)` — no baton-continuation knob on `bus_request`. |
 | `bus_reply` | Publish a `.result` reply to an inbound envelope. `req_id` is the value from an inbound `<channel source='fleet-bus' req_id='...'>` frame. `kind` defaults to `'result'` (SPEC §6). |
 | `bus_status` | Runtime state: `connected`/`mode`/`bot_name`/`manifest_size`, injection counters (`injections_delivered`, `injections_failed`, `last_injection_ts`), rate-limit counters (`per_from` / `per_subject` / `per_session_inject`: `allowed`, `denied`, `top_denials`). Returns `{ enabled: false }` when the bus is disabled. |
 | `bus_history` | Read recent audit entries (accepted, published, dropped with reason). Last ~1MB of the audit log is scanned per call. `limit` defaults to 20, capped at 200. |

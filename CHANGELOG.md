@@ -6,7 +6,8 @@
 - Add four MCP tools for bus-side reasoning: `bus_request`, `bus_reply`, `bus_status`, `bus_history`.
 - Injection frame now surfaces baton lineage (`root_id`, `origin`, `owner`, `hops`), `unsolicited="true"` on ledger-unmatched `.result`, and `late_reply_env_id` on evicted-request replies. Payload body uses the package's 8KB cap + XML escape.
 - New env knobs: `FLEET_BUS_MODE` (`primary` / `publish-only`), `FLEET_BUS_HEARTBEAT_INTERVAL_MS`, `FLEET_BUS_SUPERVISOR_SLEEP_MS`, plus the package's `FLEET_BUS_RATE_*` overrides.
-- `bus_request` default-appends a reply-discipline hint on `kind: 'text_message'` so codex-container peers wrap their reply in `<BUS to='<self>' kind='result'>`. Disable with `payload_wrap_hint: false`.
+- `bus_request` default-appends an adapter-aware reply-discipline hint on `kind: 'text_message'` — routed by recipient runtime. Codex-container peers get the `<BUS to='<self>' kind='result'>` extract hint; Claude Code peers get a `bus_reply` MCP-tool hint; unknown recipients get a protocol-neutral hint. Peer sets are env-overridable via `FLEET_CODEX_BOTS` and `FLEET_CLAUDE_BOTS` (comma-separated). Disable with `payload_wrap_hint: false`.
+- Removed the `in_reply_to_env_id` bus_request parameter (Ohm PR #23 round-2 P1, Option B). The handler previously accepted it and logged to stderr while still originating a fresh request — a false-success contract violation. Request→reply lineage now flows exclusively through `bus_reply(req_id, ...)`. Follow-up issue tracks Option A (package receive-ledger accessor for wire-id lookup).
 - Version bump 0.5.0 → 0.7.0 (subsumes the deferred #22 refactor which swapped local Stage 1+2 for the packaged import).
 
 ## 0.2.8 - 2026-07-14

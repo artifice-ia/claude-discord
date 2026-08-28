@@ -118,6 +118,11 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     subscribeBroadcast: false,
     heartbeatIntervalMs: 20,
     supervisorSleepMs: 10,
+    // Peer sets aren't exercised by the runtime supervisor — only the
+    // bus_request handler in server.ts reads them. Empty defaults keep the
+    // runtime tests focused on transport/injection concerns.
+    codexBots: new Set<string>(),
+    claudeBots: new Set<string>(),
     logger: () => {},
     injectIntoSession: async () => {},
     ...overrides,

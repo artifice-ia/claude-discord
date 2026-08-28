@@ -12,17 +12,25 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  appendReplyDisciplineHint,
+  appendReplyHint,
+  buildClaudeCodeReplyHint,
   buildInjectionFrame,
+  buildProtocolNeutralReplyHint,
   buildReplyDisciplineHint,
+  buildReplyHint,
+  classifyRecipientRuntime,
   CountingBucket,
+  DEFAULT_CLAUDE_BOTS,
+  DEFAULT_CODEX_BOTS,
   parseFleetBusMode,
   parseFleetBusStartupConfig,
+  parseFleetPeerRuntimes,
   parseOptionalPositiveInt,
+  parsePeerRuntimeSet,
   readAuditTail,
   wrapRateLimiters,
 } from './fleet-bus-wiring'
@@ -107,32 +115,236 @@ describe('buildInjectionFrame', () => {
   })
 })
 
-describe('reply-discipline hint (bus_request text_message)', () => {
-  test('hint references the sender bot and requests a wrapped reply', () => {
+describe('reply-discipline hint builders (per-runtime variants)', () => {
+  test('codex-container hint asks for <BUS>-wrapped prose', () => {
     const hint = buildReplyDisciplineHint('luna')
     expect(hint).toContain("<BUS to='luna' kind='result'>")
     expect(hint).toContain('Do not reply via Discord')
   })
 
-  test('appends to text_message payloads without mutating the caller object', () => {
+  test('Claude Code hint points at the bus_reply MCP tool, not <BUS>', () => {
+    const hint = buildClaudeCodeReplyHint('luna')
+    expect(hint).toContain('bus_reply(req_id=')
+    expect(hint).toContain('MCP tool call is the reply')
+    expect(hint).not.toContain("<BUS to='luna'")
+    // Names the sender so the model knows who is waiting.
+    expect(hint).toContain('Sender luna')
+  })
+
+  test('protocol-neutral hint flags that the plugin cannot enforce extraction', () => {
+    const hint = buildProtocolNeutralReplyHint('luna')
+    expect(hint).toContain('in_reply_to')
+    expect(hint).toContain('cannot enforce reply extraction')
+    // Neither of the two hard-wired protocols is prescribed.
+    expect(hint).not.toContain("<BUS to='luna'")
+    expect(hint).not.toContain('bus_reply(req_id=')
+  })
+})
+
+describe('classifyRecipientRuntime', () => {
+  const codex = new Set(['ohm', 'vec'])
+  const claude = new Set(['deet', 'luna'])
+
+  test('recognizes codex-container peers', () => {
+    expect(classifyRecipientRuntime('ohm', codex, claude)).toBe('codex-container')
+    expect(classifyRecipientRuntime('vec', codex, claude)).toBe('codex-container')
+  })
+
+  test('recognizes Claude Code peers', () => {
+    expect(classifyRecipientRuntime('deet', codex, claude)).toBe('claude-code')
+    expect(classifyRecipientRuntime('luna', codex, claude)).toBe('claude-code')
+  })
+
+  test('returns unknown for bots absent from both lists', () => {
+    // Mutation witness — proves the default `unknown` branch fires. Prior
+    // (broken) behavior would have shipped everyone the <BUS> hint regardless.
+    expect(classifyRecipientRuntime('some-new-bot', codex, claude)).toBe('unknown')
+  })
+
+  test('returns unknown for names that fail normalizeBotName', () => {
+    // Reserved names, non-ASCII, empty, or otherwise invalid identities can't
+    // safely be classified — treat as unknown so the neutral hint fires.
+    expect(classifyRecipientRuntime('broadcast', codex, claude)).toBe('unknown')
+    expect(classifyRecipientRuntime('', codex, claude)).toBe('unknown')
+    expect(classifyRecipientRuntime('bad.name', codex, claude)).toBe('unknown')
+  })
+
+  test('codex wins ties when a bot appears in both lists', () => {
+    // Ambiguous membership: codex takes precedence because <BUS> is what
+    // codex-container's extractor actually recognizes; a bus_reply MCP-tool
+    // hint would be a no-op for a codex peer.
+    const both = new Set(['dual'])
+    expect(classifyRecipientRuntime('dual', both, both)).toBe('codex-container')
+  })
+
+  test('normalizes case before lookup (canonical form is lowercase)', () => {
+    expect(classifyRecipientRuntime('OHM', codex, claude)).toBe('codex-container')
+    expect(classifyRecipientRuntime('Luna', codex, claude)).toBe('claude-code')
+  })
+})
+
+describe('buildReplyHint (adapter-aware dispatcher)', () => {
+  const codex = new Set(DEFAULT_CODEX_BOTS)
+  const claude = new Set(DEFAULT_CLAUDE_BOTS)
+
+  test('text_message to ohm gets the <BUS> hint', () => {
+    const { hint, runtime } = buildReplyHint({
+      recipientBot: 'ohm',
+      senderBot: 'luna',
+      codexBots: codex,
+      claudeBots: claude,
+    })
+    expect(runtime).toBe('codex-container')
+    expect(hint).toContain("<BUS to='luna' kind='result'>")
+  })
+
+  test('text_message to deet gets the bus_reply hint', () => {
+    const { hint, runtime } = buildReplyHint({
+      recipientBot: 'deet',
+      senderBot: 'luna',
+      codexBots: codex,
+      claudeBots: claude,
+    })
+    expect(runtime).toBe('claude-code')
+    expect(hint).toContain('bus_reply(req_id=')
+    expect(hint).not.toContain("<BUS to='luna'")
+  })
+
+  test('text_message to an unknown bot gets the protocol-neutral hint', () => {
+    const { hint, runtime } = buildReplyHint({
+      recipientBot: 'some-stranger',
+      senderBot: 'luna',
+      codexBots: codex,
+      claudeBots: claude,
+    })
+    // Mutation witness — proves the default branch actually fires. Losing
+    // this branch (e.g. defaulting to <BUS>) would silently route unknown
+    // recipients through codex-container extraction they can't perform.
+    expect(runtime).toBe('unknown')
+    expect(hint).toContain('cannot enforce reply extraction')
+    expect(hint).not.toContain("<BUS to='luna'")
+    expect(hint).not.toContain('bus_reply(req_id=')
+  })
+})
+
+describe('appendReplyHint (payload text append)', () => {
+  test('appends the hint to a text_message payload without mutating the caller', () => {
     const original = { text: 'please review the PR' }
-    const result = appendReplyDisciplineHint(original, 'luna') as { text: string }
-    expect(result.text.startsWith('please review the PR')).toBe(true)
-    expect(result.text.includes("<BUS to='luna'")).toBe(true)
+    const result = appendReplyHint(original, ' [HINT]') as { text: string }
+    expect(result.text).toBe('please review the PR [HINT]')
     // Caller's object is intact — mutation would silently break agents that
     // reuse payload templates across multiple sends.
     expect(original.text).toBe('please review the PR')
   })
 
   test('passes non-object payloads through unchanged', () => {
-    expect(appendReplyDisciplineHint('a raw string', 'luna')).toBe('a raw string')
-    expect(appendReplyDisciplineHint(42, 'luna')).toBe(42)
-    expect(appendReplyDisciplineHint(null, 'luna')).toBe(null)
+    expect(appendReplyHint('a raw string', ' [HINT]')).toBe('a raw string')
+    expect(appendReplyHint(42, ' [HINT]')).toBe(42)
+    expect(appendReplyHint(null, ' [HINT]')).toBe(null)
+    expect(appendReplyHint(['not', 'an', 'object'], ' [HINT]')).toEqual(['not', 'an', 'object'])
   })
 
   test('passes objects without a text field through unchanged', () => {
     const payload = { pr: 42, verdict: 'lgtm' }
-    expect(appendReplyDisciplineHint(payload, 'luna')).toBe(payload)
+    expect(appendReplyHint(payload, ' [HINT]')).toBe(payload)
+  })
+})
+
+describe('parsePeerRuntimeSet', () => {
+  test('undefined or empty raw falls back to defaults', () => {
+    const set = parsePeerRuntimeSet(undefined, ['ohm', 'vec'])
+    expect([...set].sort()).toEqual(['ohm', 'vec'])
+    const set2 = parsePeerRuntimeSet('', ['ohm'])
+    expect([...set2]).toEqual(['ohm'])
+    const set3 = parsePeerRuntimeSet('   ', ['ohm'])
+    expect([...set3]).toEqual(['ohm'])
+  })
+
+  test('comma-separated env value replaces defaults entirely', () => {
+    // Override wins — operator opts out of the default list on purpose.
+    const set = parsePeerRuntimeSet('foo,bar', ['ohm', 'vec'])
+    expect([...set].sort()).toEqual(['bar', 'foo'])
+    expect(set.has('ohm')).toBe(false)
+  })
+
+  test('trims whitespace and drops entries that fail normalizeBotName', () => {
+    const set = parsePeerRuntimeSet(' ohm , BAD.NAME , VEC ', ['unused'])
+    expect(set.has('ohm')).toBe(true)
+    expect(set.has('vec')).toBe(true) // case-normalized
+    expect(set.has('BAD.NAME')).toBe(false)
+    expect(set.size).toBe(2)
+  })
+})
+
+describe('parseFleetPeerRuntimes (env → codex/claude sets)', () => {
+  test('empty env returns the shipped defaults', () => {
+    const { codexBots, claudeBots } = parseFleetPeerRuntimes({})
+    expect([...codexBots].sort()).toEqual([...DEFAULT_CODEX_BOTS].map(s => s).sort())
+    expect([...claudeBots].sort()).toEqual([...DEFAULT_CLAUDE_BOTS].map(s => s).sort())
+    // Sanity: the shipped defaults match the manifest snapshot in the fable
+    // arch review. If a new codex bot lands and this test regresses, update
+    // DEFAULT_CODEX_BOTS AND vault/infra/fleet-manifest.yaml together.
+    expect(codexBots.has('ohm')).toBe(true)
+    expect(codexBots.has('vec')).toBe(true)
+    expect(claudeBots.has('deet')).toBe(true)
+    expect(claudeBots.has('luna')).toBe(true)
+  })
+
+  test('FLEET_CODEX_BOTS env override routes a custom bot as codex', () => {
+    // Operator adds `custom-bot` as a codex-container peer without a plugin
+    // rebuild — buildReplyHint must then dispatch it to the <BUS> hint.
+    const { codexBots, claudeBots } = parseFleetPeerRuntimes({ FLEET_CODEX_BOTS: 'custom-bot' })
+    expect(codexBots.has('custom-bot')).toBe(true)
+    // Explicit override drops the defaults — the previous codex list is gone.
+    expect(codexBots.has('ohm')).toBe(false)
+    const { hint, runtime } = buildReplyHint({
+      recipientBot: 'custom-bot',
+      senderBot: 'luna',
+      codexBots,
+      claudeBots,
+    })
+    expect(runtime).toBe('codex-container')
+    expect(hint).toContain("<BUS to='luna' kind='result'>")
+  })
+
+  test('FLEET_CLAUDE_BOTS env override routes a custom bot as claude-code', () => {
+    const { codexBots, claudeBots } = parseFleetPeerRuntimes({ FLEET_CLAUDE_BOTS: 'new-familiar' })
+    expect(claudeBots.has('new-familiar')).toBe(true)
+    expect(claudeBots.has('luna')).toBe(false)
+    const { runtime } = buildReplyHint({
+      recipientBot: 'new-familiar',
+      senderBot: 'ohm',
+      codexBots,
+      claudeBots,
+    })
+    expect(runtime).toBe('claude-code')
+  })
+})
+
+describe('bus_request MCP tool schema (server.ts source-text checks)', () => {
+  // Source-text tests — server.ts is a script, not a module, so the schema
+  // isn't independently importable. Grepping the source is the lightest
+  // regression guard: any accidental reintroduction of `in_reply_to_env_id`
+  // as a schema property or handler branch fails this test loudly.
+  const serverSource = readFileSync(join(import.meta.dir, '..', 'server.ts'), 'utf8')
+
+  test('does not advertise in_reply_to_env_id as an MCP schema property', () => {
+    // Ohm PR #23 round-2 P1 (Option B): removed to close the false-success
+    // contract violation. Reply→request lineage flows through bus_reply
+    // instead. If Option A ever lands (package receive-ledger accessor),
+    // reintroduce the property AND its handler wiring together.
+    expect(serverSource).not.toContain('in_reply_to_env_id')
+    expect(serverSource).not.toContain('inReplyToEnvId')
+  })
+
+  test('bus_request handler routes text_message via buildReplyHint (adapter-aware)', () => {
+    // Guards against a silent regression to the old codex-only path where
+    // every text_message got the <BUS> hint regardless of recipient runtime.
+    expect(serverSource).toContain('buildReplyHint({')
+    expect(serverSource).toContain('appendReplyHint(payload, hint)')
+    // The old symbol must not creep back — it took a senderBot arg only and
+    // hardcoded the <BUS> path.
+    expect(serverSource).not.toContain('appendReplyDisciplineHint(')
   })
 })
 

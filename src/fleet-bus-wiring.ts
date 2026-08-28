@@ -118,20 +118,89 @@ export function buildInjectionFrame(event: FleetBusSessionEvent): InjectionFrame
 }
 
 /* -------------------------------------------------------------------------- */
-/* Reply-discipline hint appending (bus_request ergonomic)                    */
+/* Reply-discipline hint appending (bus_request text_message ergonomic)       */
 /*                                                                             */
-/* When THIS bot sends `kind: 'text_message'` to a codex-container peer,       */
-/* the peer's session model needs to know it should reply on the bus with a   */
-/* `<BUS to='<us>' kind='result'><payload>...</payload></BUS>` block — that's  */
-/* how codex-container's `bus.py` recognizes bus-bound replies. Silent         */
-/* omission = peer replies to their own Discord channel and the request       */
-/* silently times out. Caller can opt out with `payloadWrapHint: false`.       */
+/* When THIS bot sends `kind: 'text_message'`, the peer's session model needs  */
+/* to know which reply channel it should use back to us. The routing splits    */
+/* by peer runtime:                                                            */
 /*                                                                             */
-/* Motivation: memory [[feedback_bus_reply_needs_bus_tag]]. Plugin-side       */
-/* ergonomic — kept out of the package because it's a Claude Code session      */
+/*  - codex-container peers (chis/helm/myc/ohm/vec by default) extract         */
+/*    `<BUS to='<us>' kind='result'>` prose via codex-container's `bus.py`.   */
+/*  - Claude Code peers (deet/kat/koi/luna/optimus by default) publish via     */
+/*    the `bus_reply` MCP tool exposed by this same plugin.                    */
+/*  - Unknown recipient runtimes get a protocol-neutral instruction — no wire  */
+/*    discipline the plugin can guarantee.                                     */
+/*                                                                             */
+/* Silent omission (or a codex hint sent to a Claude peer) = the peer replies  */
+/* down the wrong channel and the sender's `wait: true` request times out.     */
+/* Caller can opt out with `payloadWrapHint: false`.                           */
+/*                                                                             */
+/* Motivation: memory [[feedback_bus_reply_needs_bus_tag]] plus PR #23 Ohm     */
+/* round-2 P1 (adapter-aware routing). Plugin-side ergonomic — kept out of    */
+/* the package because runtime-classification is a Claude Code session         */
 /* adapter concern, not a wire concern.                                        */
 /* -------------------------------------------------------------------------- */
 
+export const DEFAULT_CODEX_BOTS: readonly string[] = ['chis', 'helm', 'myc', 'ohm', 'vec']
+export const DEFAULT_CLAUDE_BOTS: readonly string[] = ['deet', 'kat', 'koi', 'luna', 'optimus']
+
+export type RecipientRuntime = 'codex-container' | 'claude-code' | 'unknown'
+
+/**
+ * Parse a comma-separated env value into a canonical bot-name set, falling
+ * back to `defaults` when the raw value is undefined or empty. Entries run
+ * through `normalizeBotName` so operators can't smuggle an invalid identity
+ * in via env; anything that fails normalization is silently dropped.
+ */
+export function parsePeerRuntimeSet(raw: string | undefined, defaults: readonly string[]): ReadonlySet<string> {
+  const source = raw === undefined || raw.trim() === '' ? defaults : raw.split(',')
+  const out = new Set<string>()
+  for (const entry of source) {
+    const canonical = normalizeBotName(entry.trim())
+    if (canonical !== null) out.add(canonical)
+  }
+  return out
+}
+
+export interface FleetPeerRuntimes {
+  codexBots: ReadonlySet<string>
+  claudeBots: ReadonlySet<string>
+}
+
+/**
+ * Parse the plugin's peer-runtime classification env vars. Two overlapping
+ * lists on purpose — a bot in BOTH lists is ambiguous; codex-container wins
+ * (see `classifyRecipientRuntime`). Operators moving a bot from one runtime
+ * to the other should drop it from the losing list.
+ */
+export function parseFleetPeerRuntimes(env: NodeJS.ProcessEnv): FleetPeerRuntimes {
+  return {
+    codexBots: parsePeerRuntimeSet(env.FLEET_CODEX_BOTS, DEFAULT_CODEX_BOTS),
+    claudeBots: parsePeerRuntimeSet(env.FLEET_CLAUDE_BOTS, DEFAULT_CLAUDE_BOTS),
+  }
+}
+
+/**
+ * Classify a recipient by which bus-reply channel its session model uses.
+ * Codex wins ties — if a bot is in both lists, the `<BUS>` hint reaches
+ * codex-container's extractor and gets published; the `bus_reply` MCP tool
+ * variant would be a no-op if the recipient's runtime is actually codex.
+ */
+export function classifyRecipientRuntime(
+  recipientBot: string,
+  codexBots: ReadonlySet<string>,
+  claudeBots: ReadonlySet<string>,
+): RecipientRuntime {
+  const canonical = normalizeBotName(recipientBot)
+  if (canonical === null) return 'unknown'
+  if (codexBots.has(canonical)) return 'codex-container'
+  if (claudeBots.has(canonical)) return 'claude-code'
+  return 'unknown'
+}
+
+// codex-container peers extract `<BUS to='...' kind='result'>` from prose via
+// codex-container's `bus.py`. Historical name kept — this is the ORIGINAL
+// reply-discipline hint; per-runtime siblings below.
 export function buildReplyDisciplineHint(senderBot: string): string {
   return (
     `\n\n[bus reply-discipline] Reply on the bus: wrap your reply in ` +
@@ -140,13 +209,74 @@ export function buildReplyDisciplineHint(senderBot: string): string {
   )
 }
 
-export function appendReplyDisciplineHint(payload: unknown, senderBot: string): unknown {
+// Claude Code peers reply via the `bus_reply` MCP tool (this same plugin,
+// or a future sibling). The req_id comes from the recipient's inbound
+// <channel source='fleet-bus' req_id='...'> frame; we can't know it from
+// the sender side, so the model is instructed to read it off its own frame.
+export function buildClaudeCodeReplyHint(senderBot: string): string {
+  return (
+    `\n\n[bus reply-discipline] Reply via the bus_reply MCP tool: ` +
+    `bus_reply(req_id=<the req_id attribute on your inbound channel frame>, payload=...). ` +
+    `Do not narrate — the MCP tool call is the reply. ` +
+    `Sender ${senderBot} is waiting on the bus subject.`
+  )
+}
+
+// Unknown recipient runtimes get a protocol-neutral instruction — no wire
+// discipline the plugin can enforce, just an ask to publish `.result` on the
+// bus with in_reply_to set. Explicitly flags that the plugin can't guarantee
+// extraction so operators debugging a stuck request know where to look.
+export function buildProtocolNeutralReplyHint(senderBot: string): string {
+  return (
+    `\n\n[bus reply-discipline] Reply on the fleet-bus with in_reply_to ` +
+    `set to this envelope's id. Sender ${senderBot} is waiting on the bus ` +
+    `subject. Note: this plugin cannot enforce reply extraction for this ` +
+    `recipient runtime — the reply must reach the bus for the sender to hear it.`
+  )
+}
+
+export interface BuiltReplyHint {
+  hint: string
+  runtime: RecipientRuntime
+}
+
+/**
+ * Adapter-aware reply-discipline hint. Classifies the recipient's runtime
+ * against the configured peer sets and returns the matching hint text plus
+ * the resolved runtime (useful for observability + tests).
+ *
+ * See design doc:
+ *   ~/vault/projects/fleet/bus/adapter-designs/CLAUDE-CODE-SESSION-ADAPTER-DESIGN.md
+ */
+export function buildReplyHint(args: {
+  recipientBot: string
+  senderBot: string
+  codexBots: ReadonlySet<string>
+  claudeBots: ReadonlySet<string>
+}): BuiltReplyHint {
+  const runtime = classifyRecipientRuntime(args.recipientBot, args.codexBots, args.claudeBots)
+  switch (runtime) {
+    case 'codex-container':
+      return { hint: buildReplyDisciplineHint(args.senderBot), runtime }
+    case 'claude-code':
+      return { hint: buildClaudeCodeReplyHint(args.senderBot), runtime }
+    case 'unknown':
+      return { hint: buildProtocolNeutralReplyHint(args.senderBot), runtime }
+  }
+}
+
+/**
+ * Append a caller-provided hint string to a `text_message`-style payload's
+ * `text` field. Non-object / non-text-string payloads pass through unchanged
+ * — this hint is a text_message ergonomic, not a general payload rewrite.
+ * Never mutates the caller object; agents that reuse payload templates
+ * across sends stay untouched.
+ */
+export function appendReplyHint(payload: unknown, hint: string): unknown {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return payload
   const record = payload as Record<string, unknown>
   if (typeof record.text !== 'string') return payload
-  // Clone — never mutate caller-owned objects. Bare spread is enough because
-  // we only touch a top-level string field.
-  return { ...record, text: record.text + buildReplyDisciplineHint(senderBot) }
+  return { ...record, text: record.text + hint }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -221,6 +351,14 @@ export interface BusRuntimeConfig {
   supervisorSleepMs?: number
   logger: (message: string) => void
   injectIntoSession: (frame: InjectionFrame, event: FleetBusSessionEvent) => Promise<void>
+  /**
+   * Peer-runtime classification sets — used by the bus_request handler to
+   * pick the correct reply-discipline hint for each recipient. Populate via
+   * `parseFleetPeerRuntimes(process.env)` in server.ts; test callers can pass
+   * arbitrary sets to exercise routing branches.
+   */
+  codexBots: ReadonlySet<string>
+  claudeBots: ReadonlySet<string>
   /**
    * Test-only injection: mock the NATS `connect()` call so the supervisor
    * loop runs against a fake connection. Never set from production paths.
