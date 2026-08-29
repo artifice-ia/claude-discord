@@ -75,16 +75,52 @@ function stripPromptScaffolding(text) {
     }
   }
 
-  // Line-start strips — case-insensitive, leading whitespace allowed. Whole
-  // line drops (marker + any content after it). Covers stray unpaired
-  // openers the paired-block pass can't reach.
+  // Taint-remainder pass — any UNPAIRED wrapper opener that survived the
+  // paired-block strip means the transcript was truncated mid-scaffold and
+  // the closing tag never landed. The body between the opener and end-of-
+  // text is scaffolding, not response content. Preserve everything BEFORE
+  // the earliest surviving opener, discard opener + everything after.
+  // Ohm PR #28 P1: without this the previous pass only stripped the opener
+  // physical line and the multi-line body still reached Discord.
+  // Openers matched anywhere in text (not just line-start): a role prefix
+  // like `Human: <system-reminder>` puts the opener mid-line, and treating
+  // the wrapper as line-start-only lets human_line drop the physical line
+  // and leave the multi-line body behind.
+  const openerPatterns = [
+    ['system_reminder_open_taint', /<system-reminder\b/i],
+    ['channel_open_taint', /<channel\s+source=/i],
+    ['user_prompt_submit_hook_open_taint', /<user-prompt-submit-hook\b/i],
+  ]
+  let earliestIdx = -1
+  let earliestName = null
+  for (const [name, re] of openerPatterns) {
+    const m = re.exec(cleaned)
+    if (m && (earliestIdx === -1 || m.index < earliestIdx)) {
+      earliestIdx = m.index
+      earliestName = name
+    }
+  }
+  if (earliestIdx !== -1) {
+    // Rewind to start of the physical line — preserves legit prose ONLY when
+    // the opener is on its own line; if the opener is inlined after content
+    // like `Human: <system-reminder>`, that whole line was scaffolding anyway
+    // (line-start-strip would have removed it next). Truncating at line-start
+    // keeps behavior consistent for both cases.
+    let lineStart = cleaned.lastIndexOf('\n', earliestIdx - 1)
+    lineStart = lineStart === -1 ? 0 : lineStart + 1
+    cleaned = cleaned.slice(0, lineStart)
+    console.error(`[discord-stop-forward] filter fired: ${earliestName}`)
+  }
+
+  // Line-start strips — role prefixes on their own lines that aren't wrapped
+  // in scaffold tags (`Human:`, `Assistant:`, lone `User:`). Case-insensitive,
+  // leading whitespace allowed. Whole line drops (marker + any content after
+  // it). Runs AFTER the taint-remainder pass so it only sees text that
+  // survived scaffold truncation.
   const lineFilters = [
     ['human_line', /^\s*Human:.*$/gim],
     ['assistant_line', /^\s*Assistant:.*$/gim],
     ['user_line', /^\s*User:\s*$/gim],
-    ['user_prompt_submit_hook_line', /^\s*<user-prompt-submit-hook>.*$/gim],
-    ['channel_open_line', /^\s*<channel\s+source=.*$/gim],
-    ['system_reminder_open_line', /^\s*<system-reminder>.*$/gim],
   ]
   for (const [name, re] of lineFilters) {
     const before = cleaned
