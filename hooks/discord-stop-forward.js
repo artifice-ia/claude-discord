@@ -50,17 +50,51 @@ function textOf(content) {
 // does when producing forced-visible output on empty turns), we don't want
 // that leaking to the user's DM. Returns cleaned text; caller decides
 // whether the residue is worth forwarding.
+//
+// Two-pass filter: paired-tag strips first (catches well-formed multi-line
+// blocks), then line-start strips (catches stray unpaired tags and role
+// markers, e.g. the "tools not used" nudge Claude Code injects as
+// `Human: <system-reminder>...` into a response buffer when the previous
+// turn ended on a tool call with no trailing prose). Logs to stderr on
+// every match so operators can trace what fired without leaking the
+// stripped text itself into logs.
 function stripPromptScaffolding(text) {
   if (!text) return ''
-  const cleaned = text
-    .replace(/<system-reminder\b[\s\S]*?<\/system-reminder>/g, '')
-    .replace(/<channel\s+source="[^"]*"[\s\S]*?<\/channel>/g, '')
-    // Transcript role markers left dangling after tag-strip ("Human:",
-    // "Assistant:") are scaffolding too — drop them at line starts.
-    .replace(/^\s*(Human|Assistant|User):\s*$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-  return cleaned
+  let cleaned = text
+
+  // Paired-block strips — non-greedy so distinct blocks don't merge.
+  const pairedFilters = [
+    ['system_reminder_block', /<system-reminder\b[\s\S]*?<\/system-reminder>/g],
+    ['channel_block', /<channel\s+source="[^"]*"[\s\S]*?<\/channel>/g],
+  ]
+  for (const [name, re] of pairedFilters) {
+    const before = cleaned
+    cleaned = cleaned.replace(re, '')
+    if (cleaned !== before) {
+      console.error(`[discord-stop-forward] filter fired: ${name}`)
+    }
+  }
+
+  // Line-start strips — case-insensitive, leading whitespace allowed. Whole
+  // line drops (marker + any content after it). Covers stray unpaired
+  // openers the paired-block pass can't reach.
+  const lineFilters = [
+    ['human_line', /^\s*Human:.*$/gim],
+    ['assistant_line', /^\s*Assistant:.*$/gim],
+    ['user_line', /^\s*User:\s*$/gim],
+    ['user_prompt_submit_hook_line', /^\s*<user-prompt-submit-hook>.*$/gim],
+    ['channel_open_line', /^\s*<channel\s+source=.*$/gim],
+    ['system_reminder_open_line', /^\s*<system-reminder>.*$/gim],
+  ]
+  for (const [name, re] of lineFilters) {
+    const before = cleaned
+    cleaned = cleaned.replace(re, '')
+    if (cleaned !== before) {
+      console.error(`[discord-stop-forward] filter fired: ${name}`)
+    }
+  }
+
+  return cleaned.replace(/\n{3,}/g, '\n\n').trim()
 }
 
 function isToolResult(content) {
