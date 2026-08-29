@@ -50,17 +50,87 @@ function textOf(content) {
 // does when producing forced-visible output on empty turns), we don't want
 // that leaking to the user's DM. Returns cleaned text; caller decides
 // whether the residue is worth forwarding.
+//
+// Two-pass filter: paired-tag strips first (catches well-formed multi-line
+// blocks), then line-start strips (catches stray unpaired tags and role
+// markers, e.g. the "tools not used" nudge Claude Code injects as
+// `Human: <system-reminder>...` into a response buffer when the previous
+// turn ended on a tool call with no trailing prose). Logs to stderr on
+// every match so operators can trace what fired without leaking the
+// stripped text itself into logs.
 function stripPromptScaffolding(text) {
   if (!text) return ''
-  const cleaned = text
-    .replace(/<system-reminder\b[\s\S]*?<\/system-reminder>/g, '')
-    .replace(/<channel\s+source="[^"]*"[\s\S]*?<\/channel>/g, '')
-    // Transcript role markers left dangling after tag-strip ("Human:",
-    // "Assistant:") are scaffolding too — drop them at line starts.
-    .replace(/^\s*(Human|Assistant|User):\s*$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-  return cleaned
+  let cleaned = text
+
+  // Paired-block strips — non-greedy so distinct blocks don't merge.
+  const pairedFilters = [
+    ['system_reminder_block', /<system-reminder\b[\s\S]*?<\/system-reminder>/g],
+    ['channel_block', /<channel\s+source="[^"]*"[\s\S]*?<\/channel>/g],
+  ]
+  for (const [name, re] of pairedFilters) {
+    const before = cleaned
+    cleaned = cleaned.replace(re, '')
+    if (cleaned !== before) {
+      console.error(`[discord-stop-forward] filter fired: ${name}`)
+    }
+  }
+
+  // Taint-remainder pass — any UNPAIRED wrapper opener that survived the
+  // paired-block strip means the transcript was truncated mid-scaffold and
+  // the closing tag never landed. The body between the opener and end-of-
+  // text is scaffolding, not response content. Preserve everything BEFORE
+  // the earliest surviving opener, discard opener + everything after.
+  // Ohm PR #28 P1: without this the previous pass only stripped the opener
+  // physical line and the multi-line body still reached Discord.
+  // Openers matched anywhere in text (not just line-start): a role prefix
+  // like `Human: <system-reminder>` puts the opener mid-line, and treating
+  // the wrapper as line-start-only lets human_line drop the physical line
+  // and leave the multi-line body behind.
+  const openerPatterns = [
+    ['system_reminder_open_taint', /<system-reminder\b/i],
+    ['channel_open_taint', /<channel\s+source=/i],
+    ['user_prompt_submit_hook_open_taint', /<user-prompt-submit-hook\b/i],
+  ]
+  let earliestIdx = -1
+  let earliestName = null
+  for (const [name, re] of openerPatterns) {
+    const m = re.exec(cleaned)
+    if (m && (earliestIdx === -1 || m.index < earliestIdx)) {
+      earliestIdx = m.index
+      earliestName = name
+    }
+  }
+  if (earliestIdx !== -1) {
+    // Rewind to start of the physical line — preserves legit prose ONLY when
+    // the opener is on its own line; if the opener is inlined after content
+    // like `Human: <system-reminder>`, that whole line was scaffolding anyway
+    // (line-start-strip would have removed it next). Truncating at line-start
+    // keeps behavior consistent for both cases.
+    let lineStart = cleaned.lastIndexOf('\n', earliestIdx - 1)
+    lineStart = lineStart === -1 ? 0 : lineStart + 1
+    cleaned = cleaned.slice(0, lineStart)
+    console.error(`[discord-stop-forward] filter fired: ${earliestName}`)
+  }
+
+  // Line-start strips — role prefixes on their own lines that aren't wrapped
+  // in scaffold tags (`Human:`, `Assistant:`, lone `User:`). Case-insensitive,
+  // leading whitespace allowed. Whole line drops (marker + any content after
+  // it). Runs AFTER the taint-remainder pass so it only sees text that
+  // survived scaffold truncation.
+  const lineFilters = [
+    ['human_line', /^\s*Human:.*$/gim],
+    ['assistant_line', /^\s*Assistant:.*$/gim],
+    ['user_line', /^\s*User:\s*$/gim],
+  ]
+  for (const [name, re] of lineFilters) {
+    const before = cleaned
+    cleaned = cleaned.replace(re, '')
+    if (cleaned !== before) {
+      console.error(`[discord-stop-forward] filter fired: ${name}`)
+    }
+  }
+
+  return cleaned.replace(/\n{3,}/g, '\n\n').trim()
 }
 
 function isToolResult(content) {
