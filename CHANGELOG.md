@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2
+
+- Point `@artifice-ia/fleet-bus` at `bazfer/yugo2` (`3ee65d1`). Same package, same
+  version (0.2.0), same exports — the merged repo now carries the TypeScript
+  contract at its root alongside the Python implementation. No source changes.
+- The move was forced by bun: it cannot install a git dependency from a
+  subdirectory (oven-sh/bun#15506 open, PR #33251 unmerged), so the package must
+  live at a repo root. Merging in place would have broken this plugin's
+  dependency, which is why yugo2 is a new repo rather than a rewritten one.
+
 ## 0.7.0 - 2026-08-27
 - Wire `@artifice-ia/fleet-bus@0.2.0` (`bazfer/fleet-bus` at 71c2c6c) — Stage 4 adapter work per `~/vault/projects/fleet/bus/adapter-designs/CLAUDE-CODE-SESSION-ADAPTER-DESIGN.md` (v3).
 - Replace stub `FleetBus.connect()` with the package's supervisor loop (`bus.run()` / `bus.stop()`); reconnects across NATS blips (SPEC §1.7).

@@ -1,6 +1,6 @@
 {
   "name": "artifice-discord",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "license": "Apache-2.0",
   "type": "module",
   "bin": "./server.ts",
@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@artifice-ia/fleet-bus": "github:artifice-ia/fleet-bus#71c2c6c5cd62f9e07564840d3cc5f63188ab731f",
+    "@artifice-ia/fleet-bus": "github:bazfer/yugo2#3ee65d1b141c3833c2ea2fc0e9cd5f8a76ee07f1",
     "@discordjs/opus": "^0.9.0",
     "@discordjs/voice": "^0.19.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
