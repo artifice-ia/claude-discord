@@ -48,6 +48,7 @@ import {
   type BusRuntimeConfig,
 } from './src/fleet-bus-wiring'
 import packageJson from './package.json' with { type: 'json' }
+import { handleBusReply } from './src/bus-reply-tool'
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
 const SLASH_COMMAND_VOICE_USER_NAME = 'the configured user'
@@ -690,15 +691,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'bus_reply',
       description:
-        "Publish a `.result` reply to an inbound bus envelope. `req_id` is the local reply nonce from the inbound <channel source='fleet-bus' req_id='...'> frame. `payload` MUST be JSON-serializable. `kind` defaults to 'result' (SPEC §6). Refuses with `req_id_unknown` if the ledger has already evicted the request, or `multi_instance_publish_only` under FLEET_BUS_MODE=publish-only.",
+        "Publish a `.result` reply to an inbound bus envelope. Pass both `req_id` and `reply_token` from the inbound channel frame. For a genuinely unsolicited/late reply with no attempt token, pass null explicitly; null never authorizes mutation of a live claim. `payload` MUST be JSON-serializable. `kind` defaults to 'result' (SPEC §6).",
       inputSchema: {
         type: 'object',
         properties: {
           req_id: { type: 'string', description: "The req_id from an inbound <channel source='fleet-bus'> frame." },
+          reply_token: { type: ['string', 'null'], description: "The reply_token from the inbound frame, or null when no injection attempt owns the reply." },
           payload: { description: 'JSON-serializable reply body.' },
           kind: { type: 'string', description: "Reply kind; default 'result'." },
         },
-        required: ['req_id', 'payload'],
+        required: ['req_id', 'reply_token', 'payload'],
       },
     },
     {
@@ -864,14 +866,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       }
       case 'bus_reply': {
-        if (!fleetBus) {
-          return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
-        }
-        const reqId = args.req_id as string
-        const payload = args.payload
-        const kind = typeof args.kind === 'string' ? (args.kind as string) : 'result'
-        const result = fleetBus.bus.publishReply(reqId, payload, kind)
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        return handleBusReply(args, fleetBus?.bus ?? null)
       }
       case 'bus_status': {
         if (!fleetBus) {

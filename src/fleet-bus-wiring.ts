@@ -102,6 +102,10 @@ export interface InjectionFrame {
 export function buildInjectionFrame(event: FleetBusSessionEvent): InjectionFrame {
   const base = buildFleetBusFrameMeta(event)
   const meta: Record<string, string> = { ...base }
+  // Claim authority is per injection attempt. Only claimed request deliveries
+  // carry a token; unsolicited/late replies deliberately carry null and must
+  // not gain authority over a live claim.
+  if (event.replyToken !== null) meta.reply_token = event.replyToken
   const { envelope, unsolicited } = event
   if (unsolicited === true) meta.unsolicited = 'true'
   // Baton lineage — surface every field that arrived on the wire so the model
@@ -216,7 +220,7 @@ export function buildReplyDisciplineHint(senderBot: string): string {
 export function buildClaudeCodeReplyHint(senderBot: string): string {
   return (
     `\n\n[bus reply-discipline] Reply via the bus_reply MCP tool: ` +
-    `bus_reply(req_id=<the req_id attribute on your inbound channel frame>, payload=...). ` +
+    `bus_reply(req_id=<the req_id attribute>, reply_token=<the reply_token attribute>, payload=...). ` +
     `Do not narrate — the MCP tool call is the reply. ` +
     `Sender ${senderBot} is waiting on the bus subject.`
   )
@@ -363,6 +367,8 @@ export interface BusRuntimeConfig {
   pluginVersion: string
   manifestPath: string
   auditLogPath: string
+  /** Override the durable envelope dedup database (primarily for isolation in tests). */
+  dedupStorePath?: string
   subscribeBroadcast: boolean
   heartbeatIntervalMs?: number
   supervisorSleepMs?: number
@@ -410,6 +416,7 @@ export class BusRuntime {
       pluginVersion: config.pluginVersion,
       logger: config.logger,
       auditLogPath: config.auditLogPath,
+      ...(config.dedupStorePath !== undefined ? { dedupStorePath: config.dedupStorePath } : {}),
       rateLimiters: this.rateLimiters,
       injectIntoSession: async event => {
         const frame = buildInjectionFrame(event)

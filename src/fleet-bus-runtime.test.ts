@@ -129,6 +129,7 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     pluginVersion: '0.0.0-test',
     manifestPath,
     auditLogPath,
+    dedupStorePath: `${auditLogPath}.dedup.sqlite`,
     subscribeBroadcast: false,
     heartbeatIntervalMs: 20,
     supervisorSleepMs: 10,
@@ -200,7 +201,7 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
       hops: 0,
     }
     nc.push('fleet.luna.request', inbound)
-    await new Promise(r => setTimeout(r, 20))
+    await waitFor(() => events.length === 1)
     expect(events.length).toBe(1)
     expect(events[0]!.frameMeta.env_id).toBe('env-inject')
     expect(events[0]!.frameMeta.from_claim).toBe('ohm')
@@ -208,9 +209,38 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
     expect(events[0]!.frameMeta.origin).toBe('ohm')
     expect(events[0]!.frameMeta.owner).toBe('ohm')
     expect(events[0]!.frameMeta.hops).toBe('0')
+    expect(events[0]!.frameMeta.reply_token).toBe(events[0]!.event.replyToken)
     // Runtime state reflects delivery.
     expect(runtime.injectionsDelivered).toBe(1)
     expect(runtime.lastInjectionTs).toBeTruthy()
+    await runtime.stop()
+  })
+
+  test('null reply token cannot mutate or publish for a live claim', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-runtime-'))
+    const manifestPath = join(dir, 'manifest.yaml')
+    writeManifest(manifestPath, ['luna', 'ohm'])
+    const nc = new FakeNatsConnection()
+    let event: FleetBusSessionEvent | undefined
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const runtime = new BusRuntime(makeConfig({
+      connectFn: async () => nc as unknown as NatsConnection,
+      injectIntoSession: async (_frame, incoming) => { event = incoming; await gate },
+    }, manifestPath, join(dir, 'audit.jsonl')))
+    runtime.start()
+    await waitFor(() => runtime.state === 'connected')
+    await waitFor(() => nc.subscribed.includes('fleet.luna.request'))
+    nc.push('fleet.luna.request', {
+      envelope_version: 1, id: 'env-live-claim', from: 'ohm', to: 'luna',
+      kind: 'text_message', ts: new Date().toISOString(), payload: {},
+    })
+    await waitFor(() => event !== undefined)
+    const before = nc.publishes.length
+    const result = runtime.bus.publishReply(event!.reqId, { denied: true }, 'result', null)
+    expect(result).toMatchObject({ ok: false, error: 'claude_discord_adapter_reply_token_mismatch' })
+    expect(nc.publishes).toHaveLength(before)
+    release()
     await runtime.stop()
   })
 

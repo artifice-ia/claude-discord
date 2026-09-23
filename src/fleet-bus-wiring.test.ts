@@ -53,6 +53,7 @@ function sessionEvent(overrides: Partial<FleetBusSessionEvent> = {}, envOverride
   return {
     envelope: baseEnvelope(envOverrides),
     reqId: 'req-1234',
+    replyToken: 'attempt-token-1234',
     ...overrides,
   }
 }
@@ -65,8 +66,14 @@ describe('buildInjectionFrame', () => {
     expect(frame.meta.from_claim).toBe('ohm')
     expect(frame.meta.kind).toBe('pr_review_request')
     expect(frame.meta.req_id).toBe('req-1234')
+    expect(frame.meta.reply_token).toBe('attempt-token-1234')
     expect(frame.meta.env_id).toBe('env-abc')
     expect(frame.content).toBe('<payload>{&quot;pr&quot;:42}</payload>')
+  })
+
+  test('omits reply_token metadata when an unsolicited delivery has null authority', () => {
+    const frame = buildInjectionFrame(sessionEvent({ replyToken: null, unsolicited: true }))
+    expect(frame.meta.reply_token).toBeUndefined()
   })
 
   test('exposes baton lineage as attribute keys when present on the wire', () => {
