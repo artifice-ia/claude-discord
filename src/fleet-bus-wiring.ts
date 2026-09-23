@@ -363,6 +363,16 @@ export interface BusRuntimeConfig {
   pluginVersion: string
   manifestPath: string
   auditLogPath: string
+  /**
+   * Where the durable envelope-dedup SQLite file lives.
+   *
+   * Omitted in production so upstream picks its default,
+   * `~/.claude/fleet-bus-dedup-<bot>.sqlite`. Tests MUST set it: that default
+   * is user-global and survives the process, so a suite that leaves it unset
+   * writes into a real store, and any fixed envelope id is claimed on the
+   * first run and rejected as a duplicate on every run after.
+   */
+  dedupStorePath?: string
   subscribeBroadcast: boolean
   heartbeatIntervalMs?: number
   supervisorSleepMs?: number
@@ -394,6 +404,20 @@ export class BusRuntime {
   lastInjectionTs?: string
   lastError?: string
   private readonly allowlist: ReadonlySet<string>
+  /**
+   * `reqId` -> the attempt token of the injection currently awaiting a reply.
+   *
+   * Upstream, authority over a claim belongs to the ATTEMPT, not the envelope:
+   * `reqId` survives a takeover, so `publishReply` requires the per-attempt
+   * token the injection carried. The MCP `bus_reply` tool only receives
+   * `req_id` from the session, so the runtime has to remember the token on the
+   * session's behalf.
+   *
+   * Bounded, because an agent that never replies would otherwise leak an entry
+   * per request forever.
+   */
+  private readonly replyTokens = new Map<string, string>()
+  private static readonly REPLY_TOKEN_CAP = 512
 
   constructor(config: BusRuntimeConfig) {
     this.config = config
@@ -410,9 +434,11 @@ export class BusRuntime {
       pluginVersion: config.pluginVersion,
       logger: config.logger,
       auditLogPath: config.auditLogPath,
+      ...(config.dedupStorePath === undefined ? {} : { dedupStorePath: config.dedupStorePath }),
       rateLimiters: this.rateLimiters,
       injectIntoSession: async event => {
         const frame = buildInjectionFrame(event)
+        this.rememberReplyToken(event.reqId, event.replyToken)
         try {
           await config.injectIntoSession(frame, event)
           this.injectionsDelivered += 1
@@ -457,6 +483,50 @@ export class BusRuntime {
    * → connected on first live nats.js connection) and by the promise chain
    * below (→ stopping on clean resolve, → error on unrecoverable reject).
    */
+  /**
+   * Record the attempt token for an injection about to be delivered.
+   *
+   * A takeover re-injects the SAME `reqId` under a new owner and a new token,
+   * so the newest attempt overwrites: it is the one whose claim is live, and
+   * the only one whose reply can still be settled.
+   */
+  private rememberReplyToken(reqId: string, replyToken: string | null): void {
+    if (replyToken === null) return
+    // Re-insert to move the key to the end of Map's insertion order, so the
+    // eviction below is least-recently-injected rather than arbitrary.
+    this.replyTokens.delete(reqId)
+    this.replyTokens.set(reqId, replyToken)
+    while (this.replyTokens.size > BusRuntime.REPLY_TOKEN_CAP) {
+      const oldest = this.replyTokens.keys().next()
+      if (oldest.done === true) break
+      this.replyTokens.delete(oldest.value)
+    }
+  }
+
+  /**
+   * Take the attempt token for `reqId`, consuming it.
+   *
+   * Returns `null` when nothing is held. `null` is NOT a wildcard upstream: it
+   * declares "this caller has no attempt" and therefore WITHHOLDS authority
+   * over any live claim, which is the safe answer for a reply we cannot tie to
+   * an injection we made. Never fabricate a token to satisfy the signature.
+   *
+   * Consuming on read means a second reply to the same `reqId` — a stale turn
+   * answering after the real one — arrives with no token and is refused rather
+   * than settling a claim that may by then belong to a replacement attempt.
+   */
+  takeReplyToken(reqId: string): string | null {
+    const token = this.replyTokens.get(reqId)
+    if (token === undefined) return null
+    this.replyTokens.delete(reqId)
+    return token
+  }
+
+  /** Test seam: how many attempt tokens are currently held. */
+  pendingReplyTokenCount(): number {
+    return this.replyTokens.size
+  }
+
   start(): void {
     this.supervisorPromise = this.bus.run().then(
       () => {

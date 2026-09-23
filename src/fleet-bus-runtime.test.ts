@@ -130,6 +130,11 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     manifestPath,
     auditLogPath,
     subscribeBroadcast: false,
+    // Isolate the durable dedup store. Left unset it defaults to
+    // ~/.claude/fleet-bus-dedup-<bot>.sqlite — a real, user-global file that
+    // persists between runs, so a fixed envelope id passes once and is a
+    // duplicate forever after.
+    dedupStorePath: join(auditLogPath, '..', 'dedup.sqlite'),
     heartbeatIntervalMs: 20,
     supervisorSleepMs: 10,
     // Peer sets aren't exercised by the runtime supervisor — only the

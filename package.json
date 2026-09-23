@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@artifice-ia/fleet-bus": "github:bazfer/yugo2#37b01fd29942",
+    "@artifice-ia/fleet-bus": "github:bazfer/yugo2#7a34a0715264b7f92d56be46d5d782e86176b543",
     "@discordjs/opus": "^0.9.0",
     "@discordjs/voice": "^0.19.2",
     "@modelcontextprotocol/sdk": "^1.0.0",

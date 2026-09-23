@@ -870,7 +870,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const reqId = args.req_id as string
         const payload = args.payload
         const kind = typeof args.kind === 'string' ? (args.kind as string) : 'result'
-        const result = fleetBus.bus.publishReply(reqId, payload, kind)
+        // Authority belongs to the ATTEMPT, not the reqId: `reqId` survives a
+        // takeover, so upstream requires the token its injection carried. The
+        // session only hands us `req_id`, so the runtime holds the token for
+        // it. No token held -> null, which withholds authority rather than
+        // granting it.
+        const replyToken = fleetBus.takeReplyToken(reqId)
+        const result = fleetBus.bus.publishReply(reqId, payload, kind, replyToken)
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       }
       case 'bus_status': {

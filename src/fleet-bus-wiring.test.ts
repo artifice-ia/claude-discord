@@ -22,6 +22,7 @@ import {
   buildProtocolNeutralReplyHint,
   buildReplyDisciplineHint,
   buildReplyHint,
+  BusRuntime,
   classifyRecipientRuntime,
   CountingBucket,
   DEFAULT_CLAUDE_BOTS,
@@ -53,6 +54,7 @@ function sessionEvent(overrides: Partial<FleetBusSessionEvent> = {}, envOverride
   return {
     envelope: baseEnvelope(envOverrides),
     reqId: 'req-1234',
+    replyToken: 'tok-1234',
     ...overrides,
   }
 }
@@ -581,5 +583,91 @@ describe('parseFleetBusStartupConfig', () => {
     expect(cfg.mode).toBe('primary')
     expect(cfg.heartbeatIntervalMs).toBeUndefined()
     expect(cfg.supervisorSleepMs).toBeUndefined()
+  })
+})
+
+describe('attempt-token custody for bus_reply', () => {
+  // The MCP `bus_reply` tool receives only `req_id` from the session, while
+  // upstream `publishReply` requires the per-attempt token. These cover the
+  // runtime holding that token on the session's behalf. Each was checked by
+  // deleting the guard it names and confirming the test goes red.
+
+  function runtime(): BusRuntime {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-bus-tokens-'))
+    const manifestPath = join(dir, 'manifest.yaml')
+    writeFileSync(manifestPath, 'version: 1\nbot_names:\n  - deet\n  - ohm\n  - vec\n')
+    return new BusRuntime({
+      botName: 'deet',
+      password: 'unused',
+      url: 'nats://127.0.0.1:4222',
+      manifestPath,
+      auditLogPath: join(dir, 'audit.jsonl'),
+      dedupStorePath: join(dir, 'dedup.sqlite'),
+      subscribeBroadcast: false,
+      heartbeatIntervalMs: 1000,
+      supervisorSleepMs: 1000,
+      codexBots: new Set<string>(),
+      claudeBots: new Set<string>(),
+      logger: () => {},
+      injectIntoSession: async () => {},
+    })
+  }
+
+  test('a token injected for a reqId is handed back to the matching reply', async () => {
+    const rt = runtime()
+    await rt.bus.config.injectIntoSession(sessionEvent({ reqId: 'r-1', replyToken: 'tok-A' }))
+    expect(rt.takeReplyToken('r-1')).toBe('tok-A')
+  })
+
+  test('a token is CONSUMED, so a stale second reply carries no authority', async () => {
+    // Guards `takeReplyToken`'s delete. Without it a stale turn replying after
+    // the real one would re-present a token and settle a claim that may by then
+    // belong to a replacement attempt.
+    const rt = runtime()
+    await rt.bus.config.injectIntoSession(sessionEvent({ reqId: 'r-2', replyToken: 'tok-B' }))
+    expect(rt.takeReplyToken('r-2')).toBe('tok-B')
+    expect(rt.takeReplyToken('r-2')).toBeNull()
+    expect(rt.pendingReplyTokenCount()).toBe(0)
+  })
+
+  test('an unknown reqId yields null rather than a fabricated token', async () => {
+    // THE SAFETY HALF. null withholds authority upstream; anything non-null
+    // would assert an attempt this runtime never made.
+    const rt = runtime()
+    expect(rt.takeReplyToken('never-injected')).toBeNull()
+  })
+
+  test('a takeover overwrites: the newest attempt owns the reqId', async () => {
+    // reqId survives a takeover and is re-injected under a new owner and token.
+    // The older token must not be the one handed back — its claim is gone.
+    const rt = runtime()
+    await rt.bus.config.injectIntoSession(sessionEvent({ reqId: 'r-3', replyToken: 'tok-old' }))
+    await rt.bus.config.injectIntoSession(sessionEvent({ reqId: 'r-3', replyToken: 'tok-new' }))
+    expect(rt.pendingReplyTokenCount()).toBe(1)
+    expect(rt.takeReplyToken('r-3')).toBe('tok-new')
+  })
+
+  test('a null token is not stored, so unsolicited injections hold nothing', async () => {
+    // Unsolicited and late-reply injections have no attempt behind them.
+    const rt = runtime()
+    await rt.bus.config.injectIntoSession(
+      sessionEvent({ reqId: 'r-4', replyToken: null, unsolicited: true }),
+    )
+    expect(rt.pendingReplyTokenCount()).toBe(0)
+    expect(rt.takeReplyToken('r-4')).toBeNull()
+  })
+
+  test('custody is bounded: an agent that never replies cannot leak forever', async () => {
+    // Guards the eviction loop. Without it this map grows without limit.
+    const rt = runtime()
+    for (let i = 0; i < 600; i += 1) {
+      await rt.bus.config.injectIntoSession(
+        sessionEvent({ reqId: `bulk-${i}`, replyToken: `tok-${i}` }),
+      )
+    }
+    expect(rt.pendingReplyTokenCount()).toBeLessThanOrEqual(512)
+    // Eviction is least-recently-injected: the newest survive, the oldest go.
+    expect(rt.takeReplyToken('bulk-599')).toBe('tok-599')
+    expect(rt.takeReplyToken('bulk-0')).toBeNull()
   })
 })

@@ -5,7 +5,7 @@
     "": {
       "name": "artifice-discord",
       "dependencies": {
-        "@artifice-ia/fleet-bus": "github:bazfer/yugo2#37b01fd29942",
+        "@artifice-ia/fleet-bus": "github:bazfer/yugo2#7a34a0715264b7f92d56be46d5d782e86176b543",
         "@discordjs/opus": "^0.9.0",
         "@discordjs/voice": "^0.19.2",
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -20,7 +20,7 @@
     "@discordjs/builders": "1.14.1",
   },
   "packages": {
-    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@github:bazfer/yugo2#37b01fd", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "bazfer-yugo-37b01fd", "sha512-ZWbh7S+l2VOjcEC/QAvT9r0TsysH6l3OLUNUtm0pVTw4ueYnn2T23yoKwPCCI5CXUvZxSTt0gioHwKXt90WvdQ=="],
+    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@github:bazfer/yugo2#7a34a07", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "bazfer-yugo-7a34a07", "sha512-8kldNIBO22j6wN5M3JIlnvIXqYGJ69zTaP3rXEUOUxAzJwglH4kQWWh+X3+D8NrVCDWAJ6KBNI+RFgL4r3m2sg=="],
 
     "@derhuerst/http-basic": ["@derhuerst/http-basic@8.2.4", "", { "dependencies": { "caseless": "^0.12.0", "concat-stream": "^2.0.0", "http-response-object": "^3.0.1", "parse-cache-control": "^1.0.1" } }, "sha512-F9rL9k9Xjf5blCz8HsJRO4diy111cayL2vkY2XE4r4t3n0yPXVYy3KD3nJ1qbrSn9743UWSXH4IwuCa/HWlGFw=="],
 
