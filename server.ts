@@ -48,6 +48,7 @@ import {
   type BusRuntimeConfig,
 } from './src/fleet-bus-wiring'
 import packageJson from './package.json' with { type: 'json' }
+import { handleBusReply } from './src/bus-reply-tool'
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
 const SLASH_COMMAND_VOICE_USER_NAME = 'the configured user'
@@ -865,15 +866,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       }
       case 'bus_reply': {
-        if (!fleetBus) {
-          return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
-        }
-        const reqId = args.req_id as string
-        const replyToken = args.reply_token as string | null
-        const payload = args.payload
-        const kind = typeof args.kind === 'string' ? (args.kind as string) : 'result'
-        const result = fleetBus.bus.publishReply(reqId, payload, kind, replyToken)
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+        return handleBusReply(args, fleetBus?.bus ?? null)
       }
       case 'bus_status': {
         if (!fleetBus) {
