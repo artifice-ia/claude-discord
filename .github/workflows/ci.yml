@@ -7,9 +7,11 @@ on:
     branches: [main]
 
 # Bun caches its downloaded binary + install cache per-runner; concurrency
-# cancels stale runs on the same ref so a fresh push preempts an in-flight one.
+# cancels stale runs on the SAME ref AND SAME event so a fresh PR push preempts
+# an in-flight PR run, but a post-merge `push` to main isn't cancelled by a
+# rapid follow-on merge — historical record on main survives.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
