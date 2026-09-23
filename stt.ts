@@ -63,7 +63,11 @@ export async function transcribe(opusBuffer: Buffer): Promise<string> {
 
   const wav = pcmToWav(pcm)
   const form = new FormData()
-  form.append('file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav')
+  // `Buffer`'s backing store is typed `ArrayBufferLike`, which since TS 5.7
+  // includes `SharedArrayBuffer` and so no longer satisfies `BlobPart`. Wrap in
+  // a plain view rather than widening `lib` or reaching for `skipLibCheck`:
+  // one call site, no config blast radius.
+  form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav')
   form.append('model', 'whisper-1')
 
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
