@@ -104,6 +104,34 @@ describe('readOptionalStringArray', () => {
   })
 })
 
+describe('presence check uses Object.hasOwn, not `in` (prototype-poisoning guard)', () => {
+  // Design comment on args-validation.ts states presence uses Object.hasOwn
+  // specifically so a caller cannot bypass by putting the key on
+  // Object.prototype. Without this test, a future refactor swapping
+  // Object.hasOwn(args, key) for `key in args` would silently regress the
+  // guarantee — that regression is the exact shape of a supply-chain-style
+  // hazard where a polluted prototype sneaks past validation.
+  test('inherited key on Object.prototype does NOT satisfy readOptionalString', () => {
+    // Round-trip the pollution ourselves so we can guarantee cleanup even
+    // when the assertion throws.
+    ;(Object.prototype as unknown as { reply_to?: string }).reply_to = 'polluted'
+    try {
+      expect(readOptionalString({}, 'reply_to')).toBeUndefined()
+    } finally {
+      delete (Object.prototype as unknown as { reply_to?: string }).reply_to
+    }
+  })
+
+  test('inherited key on Object.prototype does NOT satisfy readRequiredUnknown', () => {
+    ;(Object.prototype as unknown as { payload?: unknown }).payload = { poisoned: true }
+    try {
+      expect(() => readRequiredUnknown({}, 'payload')).toThrow('payload is required')
+    } finally {
+      delete (Object.prototype as unknown as { payload?: unknown }).payload
+    }
+  })
+})
+
 describe('readRequiredUnknown', () => {
   test('returns the value verbatim when the key is present', () => {
     const payload = { nested: true }
