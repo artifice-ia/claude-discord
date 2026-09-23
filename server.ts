@@ -49,6 +49,14 @@ import {
 } from './src/fleet-bus-wiring'
 import packageJson from './package.json' with { type: 'json' }
 import { handleBusReply } from './src/bus-reply-tool'
+import {
+  readString,
+  readOptionalString,
+  readOptionalNumber,
+  readOptionalBoolean,
+  readOptionalStringArray,
+  readRequiredUnknown,
+} from './src/args-validation'
 
 const VOICE_TRANSCRIPT_USER_NAME = 'User'
 const SLASH_COMMAND_VOICE_USER_NAME = 'the configured user'
@@ -731,10 +739,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'reply': {
-        const chat_id = args.chat_id as string
-        const text = args.text as string
-        const reply_to = args.reply_to as string | undefined
-        const files = (args.files as string[] | undefined) ?? []
+        const chat_id = readString(args, 'chat_id')
+        const text = readString(args, 'text')
+        const reply_to = readOptionalString(args, 'reply_to')
+        const files = readOptionalStringArray(args, 'files') ?? []
 
         const ch = await fetchAllowedChannel(chat_id)
         if (!('send' in ch)) throw new Error('channel is not sendable')
@@ -786,8 +794,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: result }] }
       }
       case 'fetch_messages': {
-        const ch = await fetchAllowedChannel(args.channel as string)
-        const limit = Math.min((args.limit as number) ?? 20, 100)
+        const ch = await fetchAllowedChannel(readString(args, 'channel'))
+        const limit = Math.min(readOptionalNumber(args, 'limit') ?? 20, 100)
         const msgs = await ch.messages.fetch({ limit })
         const me = client.user?.id
         const arr = [...msgs.values()].reverse()
@@ -809,20 +817,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: out }] }
       }
       case 'react': {
-        const ch = await fetchAllowedChannel(args.chat_id as string)
-        const msg = await ch.messages.fetch(args.message_id as string)
-        await msg.react(args.emoji as string)
+        const ch = await fetchAllowedChannel(readString(args, 'chat_id'))
+        const msg = await ch.messages.fetch(readString(args, 'message_id'))
+        await msg.react(readString(args, 'emoji'))
         return { content: [{ type: 'text', text: 'reacted' }] }
       }
       case 'edit_message': {
-        const ch = await fetchAllowedChannel(args.chat_id as string)
-        const msg = await ch.messages.fetch(args.message_id as string)
-        const edited = await msg.edit(args.text as string)
+        const ch = await fetchAllowedChannel(readString(args, 'chat_id'))
+        const msg = await ch.messages.fetch(readString(args, 'message_id'))
+        const edited = await msg.edit(readString(args, 'text'))
         return { content: [{ type: 'text', text: `edited (id: ${edited.id})` }] }
       }
       case 'download_attachment': {
-        const ch = await fetchAllowedChannel(args.chat_id as string)
-        const msg = await ch.messages.fetch(args.message_id as string)
+        const ch = await fetchAllowedChannel(readString(args, 'chat_id'))
+        const msg = await ch.messages.fetch(readString(args, 'message_id'))
         if (msg.attachments.size === 0) {
           return { content: [{ type: 'text', text: 'message has no attachments' }] }
         }
@@ -840,13 +848,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (!fleetBus) {
           return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
         }
-        const to = args.to as string
-        const kind = args.kind as string
-        let payload = args.payload
-        const wait = args.wait === true
-        const timeoutMs = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined
-        const force = args.force === true
-        const wrapHint = args.payload_wrap_hint !== false // default true
+        const to = readString(args, 'to')
+        const kind = readString(args, 'kind')
+        let payload = readRequiredUnknown(args, 'payload')
+        const wait = readOptionalBoolean(args, 'wait') === true
+        const timeoutMs = readOptionalNumber(args, 'timeout_ms')
+        const force = readOptionalBoolean(args, 'force') === true
+        // payload_wrap_hint defaults to true when absent; readOptionalBoolean
+        // returns undefined for absent/undefined, so this preserves the
+        // original `args.payload_wrap_hint !== false` semantics.
+        const wrapHint = readOptionalBoolean(args, 'payload_wrap_hint') !== false
         // text_message ergonomic — appended BEFORE publish so the peer sees
         // the hint on the wire. Skip when the caller explicitly opts out or
         // sends a non-text_message kind. Hint text is adapter-aware: codex
@@ -879,7 +890,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (!fleetBus) {
           return { content: [{ type: 'text', text: 'fleet-bus disabled or unavailable' }], isError: true }
         }
-        const limitRaw = typeof args.limit === 'number' ? args.limit : 20
+        const limitRaw = readOptionalNumber(args, 'limit') ?? 20
         const limit = Math.max(1, Math.min(limitRaw, 200))
         const entries = readAuditTail(fleetBus.config.auditLogPath, limit)
         return { content: [{ type: 'text', text: JSON.stringify({ count: entries.length, entries }, null, 2) }] }
