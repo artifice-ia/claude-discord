@@ -63,6 +63,38 @@ describe('bus_reply registered MCP handler boundary', () => {
     expect(calls).toHaveLength(0)
   })
 
+  // Issue #38 — the following three guards were present but unpinned before this
+  // commit. Ohm's mutation table showed each could be deleted and the pre-existing
+  // suite still passed 5/5. Each new test asserts BOTH that the specific guard's
+  // error surfaces AND that the bus was never touched, so a future deletion would
+  // fail loudly. Do not weaken these to `expect(result.isError).toBe(true)` alone
+  // — that would re-open the same hole under a different guard collapsing into a
+  // near-identical error message.
+
+  test('rejects a wrong-type req_id without touching the bus', async () => {
+    const { client, calls } = await connectedToolClient()
+    const result = await client.callTool({ name: 'bus_reply', arguments: { req_id: 42, reply_token: null, payload: {} } })
+    expect(result.isError).toBe(true)
+    expect(result.content).toEqual([{ type: 'text', text: 'bus_reply failed: req_id must be a string' }])
+    expect(calls).toHaveLength(0)
+  })
+
+  test('rejects an omitted payload without touching the bus', async () => {
+    const { client, calls } = await connectedToolClient()
+    const result = await client.callTool({ name: 'bus_reply', arguments: { req_id: 'req-1', reply_token: null } })
+    expect(result.isError).toBe(true)
+    expect(result.content).toEqual([{ type: 'text', text: 'bus_reply failed: payload is required' }])
+    expect(calls).toHaveLength(0)
+  })
+
+  test('rejects a wrong-type kind without touching the bus', async () => {
+    const { client, calls } = await connectedToolClient()
+    const result = await client.callTool({ name: 'bus_reply', arguments: { req_id: 'req-1', reply_token: null, payload: {}, kind: 42 } })
+    expect(result.isError).toBe(true)
+    expect(result.content).toEqual([{ type: 'text', text: 'bus_reply failed: kind must be a string when provided' }])
+    expect(calls).toHaveLength(0)
+  })
+
   test('accepts an explicitly null token when no live claim exists', async () => {
     const { client, calls } = await connectedToolClient()
     const result = await client.callTool({ name: 'bus_reply', arguments: { req_id: 'req-late', reply_token: null, payload: { late: true } } })
