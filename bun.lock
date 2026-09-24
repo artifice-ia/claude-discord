@@ -5,7 +5,7 @@
     "": {
       "name": "artifice-discord",
       "dependencies": {
-        "@artifice-ia/fleet-bus": "github:bazfer/yugo2#7a34a07",
+        "@artifice-ia/fleet-bus": "github:bazfer/yugo2#5f609e8",
         "@discordjs/opus": "^0.9.0",
         "@discordjs/voice": "^0.19.2",
         "@modelcontextprotocol/sdk": "^1.0.0",
@@ -25,7 +25,7 @@
     "@discordjs/builders": "1.14.1",
   },
   "packages": {
-    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@github:bazfer/yugo2#7a34a07", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "bazfer-yugo-7a34a07"],
+    "@artifice-ia/fleet-bus": ["@artifice-ia/fleet-bus@github:bazfer/yugo2#5f609e8", { "dependencies": { "nats": "^2.29.3", "yaml": "^2.9.0" } }, "bazfer-yugo-5f609e8", "sha512-M5dHzAEG8XCKdsO2s+Zlkx/0L6+pWrQdfhLHZkvyL7taa5f0E1Bi25eN+5/awCuzQx/XZZyw6gUm7Wv2QfWUVg=="],
 
     "@derhuerst/http-basic": ["@derhuerst/http-basic@8.2.4", "", { "dependencies": { "caseless": "^0.12.0", "concat-stream": "^2.0.0", "http-response-object": "^3.0.1", "parse-cache-control": "^1.0.1" } }, "sha512-F9rL9k9Xjf5blCz8HsJRO4diy111cayL2vkY2XE4r4t3n0yPXVYy3KD3nJ1qbrSn9743UWSXH4IwuCa/HWlGFw=="],
 
