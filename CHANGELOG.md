@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.8.2
+
+- Bump `@artifice-ia/fleet-bus` to `bazfer/yugo2#5f609e8`, deploying **yugo #26
+  Release 1**: the dedup-store `INSERT` now names its columns explicitly instead
+  of binding positionally, in both the TypeScript and Python ports.
+
+  This is forward-compatibility groundwork with **no behavioural change today**.
+  Release 2 adds `DEFAULT`ed columns to `envelope_dedup_v2`, and an
+  unnamed-column `INSERT` fails against a wider table *regardless of DEFAULT*
+  (`table envelope_dedup_v2 has 7 columns but 6 values were supplied`). So the
+  named form has to reach every accessor before the columns exist, which is only
+  possible as its own release.
+
+  Verified against the live six-column stores: the named columns match on disk
+  exactly — same names, same order, same count. No migration, no existing row
+  reinterpreted.
+
+  **Known coverage gap, recorded deliberately:** the yugo suite passes with this
+  change reverted, because every test uses a six-column table where positional
+  and named `INSERT` behave identically. Neither repo's CI distinguishes the two
+  forms. A test with teeth requires a *wider* table — create the v2 table,
+  `ALTER TABLE ... ADD COLUMN`, then claim — and that arrives with Release 2.
+
+## 0.8.1
+
+- Bump manifests to 0.8.1; correct the `Uint8Array` comment.
+
+## 0.8.0
+
+- **Validate every tool handler's arguments at runtime, not just `bus_reply`**
+  (`src/args-validation.ts`, issue #39). The MCP low-level SDK validates only the
+  generic `tools/call` envelope — the `inputSchema` advertised in `tools/list` is
+  documentation, not enforcement — so handlers previously received whatever the
+  caller sent.
+
+  **This narrows accepted input on several call sites.** Values the earlier
+  release silently tolerated now return a tool error naming the offending key:
+  `reply_to: null` and `files: null` (previously coerced to "absent"), a
+  stringified `limit` such as `"50"` (previously coerced by `Math.min`), and
+  stringified `wait` / `force` / `timeout_ms` on `bus_request` (previously
+  ignored, taking the default). Each of these was already invalid against the
+  published `inputSchema`; the validation makes the declared contract real.
+
+  These throws are caught and converted to `{isError: true}` tool results — the
+  process does not die and the caller can retry. If a bot goes unexpectedly quiet
+  after upgrading, check stderr for `must be a string when provided` first.
+
+- Add a `bun test` + `tsc --noEmit` CI workflow, a `tsconfig.json` and dev
+  dependencies (issue #37). The repo previously had no typecheck at all.
+- Pin `bus_reply`'s `req_id` / `payload` / `kind` guards with tests (issue #38).
+
+## 0.7.4
+
+- Propagate the fleet-bus reply authority token: `publishReply` takes a
+  per-attempt `replyToken` as **required-and-nullable** (`string | null`) rather
+  than optional. An optional parameter whose omission disables the feature
+  compiles clean at every unmigrated call site and then fails every reply at
+  runtime.
+- Pin `@artifice-ia/fleet-bus` to Expand only (`37b01fd`).
+
+## 0.7.3
+
+- Add `claude-opus-5` to the context-window map.
+
 ## 0.7.2
 
 - Point `@artifice-ia/fleet-bus` at `bazfer/yugo2` (`3ee65d1`). Same package, same
