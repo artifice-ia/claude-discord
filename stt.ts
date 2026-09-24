@@ -64,9 +64,15 @@ export async function transcribe(opusBuffer: Buffer): Promise<string> {
   const wav = pcmToWav(pcm)
   const form = new FormData()
   // `Buffer`'s backing store is typed `ArrayBufferLike`, which since TS 5.7
-  // includes `SharedArrayBuffer` and so no longer satisfies `BlobPart`. Wrap in
-  // a plain view rather than widening `lib` or reaching for `skipLibCheck`:
-  // one call site, no config blast radius.
+  // includes `SharedArrayBuffer` and so no longer satisfies `BlobPart`.
+  //
+  // `new Uint8Array(wav)` COPIES the Buffer's elements into a fresh array — it
+  // is not a view over `wav.buffer`. That matters: Node pools small Buffers, so
+  // a view would expose neighbouring bytes from the shared 8KB backing store.
+  // The copy is the cost, and it is the reason this is correct.
+  //
+  // Preferred over widening `lib` or reaching for `skipLibCheck`: one call
+  // site, no config blast radius.
   form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav')
   form.append('model', 'whisper-1')
 
