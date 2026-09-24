@@ -209,7 +209,12 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
     expect(events[0]!.frameMeta.origin).toBe('ohm')
     expect(events[0]!.frameMeta.owner).toBe('ohm')
     expect(events[0]!.frameMeta.hops).toBe('0')
-    expect(events[0]!.frameMeta.reply_token).toBe(events[0]!.event.replyToken)
+    // A request injection ALWAYS carries an attempt token; only the unsolicited
+    // and late-reply paths pass null. Assert that first, then compare — rather
+    // than casting the nullability away, which would erase the exact
+    // distinction the reply_token contract exists to enforce.
+    expect(typeof events[0]!.event.replyToken).toBe('string')
+    expect(events[0]!.frameMeta.reply_token).toBe(events[0]!.event.replyToken!)
     // Runtime state reflects delivery.
     expect(runtime.injectionsDelivered).toBe(1)
     expect(runtime.lastInjectionTs).toBeTruthy()
