@@ -40,6 +40,7 @@ import {
   BusRuntime,
   appendReplyHint,
   buildReplyHint,
+  defaultDedupStorePath,
   loadFleetManifestAllowlist,
   normalizeBotName,
   parseFleetBusStartupConfig,
@@ -957,6 +958,12 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
       process.exit(1)
     }
     const { mode, heartbeatIntervalMs, supervisorSleepMs } = startupConfig
+    // yugo #47 removed the package's `~/.claude/fleet-bus-dedup-<bot>.sqlite`
+    // default, so the plugin now names the store explicitly. The default keeps
+    // that exact path — every live bot's claim history is already in it — and it
+    // is built with homedir(), never a literal '~', which no fs layer expands.
+    // #47 also dropped the implicit mkdir: the parent directory must pre-exist.
+    const dedupStorePath = startupConfig.dedupStorePath ?? defaultDedupStorePath(botName)
     const peerRuntimes = parseFleetPeerRuntimes(process.env)
     // FleetBus is optional: never hold Discord startup behind a network await.
     void (async () => {
@@ -971,6 +978,7 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
           pluginVersion: packageJson.version,
           manifestPath: process.env.FLEET_BUS_MANIFEST_PATH ?? join(homedir(), 'vault', 'infra', 'fleet-manifest.yaml'),
           auditLogPath: process.env.FLEET_BUS_AUDIT_LOG_PATH ?? join(homedir(), '.claude', 'fleet-bus-log.jsonl'),
+          dedupStorePath,
           subscribeBroadcast: process.env.FLEET_BUS_SUBSCRIBE_BROADCAST === '1',
           heartbeatIntervalMs,
           supervisorSleepMs,
