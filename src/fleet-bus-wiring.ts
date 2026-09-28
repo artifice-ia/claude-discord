@@ -18,6 +18,7 @@ import {
   buildFleetBusFrameMeta,
   buildFleetBusFramePayloadBody,
   defaultRateLimiters,
+  DurableEnvelopeDedupStore,
   escapeFrameIdentifier,
   FleetBus,
   loadFleetManifestAllowlist,
@@ -370,15 +371,25 @@ export interface BusRuntimeConfig {
   manifestPath: string
   auditLogPath: string
   /**
-   * Durable envelope dedup database. **Required** — the package removed its
+   * Durable envelope dedup store, already open. **Required, and an instance
+   * rather than a path** — the package removed its
    * `~/.claude/fleet-bus-dedup-<botName>.sqlite` default in yugo #47 because a
    * user-global default meant a test run and a live bot shared one durable
-   * store (#29). Production passes `defaultDedupStorePath(botName)`; tests pass
-   * an isolated temporary path. No optional marker on purpose: omitting it must
-   * be a compile error, not a runtime one (same reasoning as `replyToken` in
-   * 0.7.4).
+   * store (#29).
+   *
+   * Taking the instance means the caller has already proven the storage works:
+   * constructing a `DurableEnvelopeDedupStore` opens SQLite, creates the schema
+   * and throws on a missing or unwritable parent or a file that is not a
+   * database. server.ts does that on its fatal startup path, so unusable
+   * storage exits the process instead of being swallowed by the supervisor's
+   * catch. Passing the opened store rather than the path also makes it
+   * impossible for the supervisor to open a *different* store than the one
+   * that was validated.
+   *
+   * No optional marker on purpose: omitting it must be a compile error, not a
+   * runtime one (same reasoning as `replyToken` in 0.7.4).
    */
-  dedupStorePath: string
+  dedupStore: DurableEnvelopeDedupStore
   subscribeBroadcast: boolean
   heartbeatIntervalMs?: number
   supervisorSleepMs?: number
@@ -426,7 +437,7 @@ export class BusRuntime {
       pluginVersion: config.pluginVersion,
       logger: config.logger,
       auditLogPath: config.auditLogPath,
-      dedupStorePath: config.dedupStorePath,
+      dedupStore: config.dedupStore,
       rateLimiters: this.rateLimiters,
       injectIntoSession: async event => {
         const frame = buildInjectionFrame(event)
@@ -638,4 +649,4 @@ export function parseFleetBusStartupConfig(env: NodeJS.ProcessEnv): FleetBusStar
 
 // Re-export the package pieces server.ts needs so the import surface stays
 // concentrated in one place.
-export { normalizeBotName, loadFleetManifestAllowlist }
+export { normalizeBotName, loadFleetManifestAllowlist, DurableEnvelopeDedupStore }

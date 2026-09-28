@@ -41,6 +41,7 @@ import {
   appendReplyHint,
   buildReplyHint,
   defaultDedupStorePath,
+  DurableEnvelopeDedupStore,
   loadFleetManifestAllowlist,
   normalizeBotName,
   parseFleetBusStartupConfig,
@@ -964,6 +965,28 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
     // is built with homedir(), never a literal '~', which no fs layer expands.
     // #47 also dropped the implicit mkdir: the parent directory must pre-exist.
     const dedupStorePath = startupConfig.dedupStorePath ?? defaultDedupStorePath(botName)
+    // Storage joins the fatal path next to the config parse, and deliberately
+    // NOT the async block below: that block's catch swallows every throw, so a
+    // store opened there would leave Discord running with a silently dead bus
+    // and nothing downstream any wiser. Constructing the store IS the
+    // validation — it opens SQLite, creates the schema, and throws naming the
+    // path on a missing or unwritable parent or a file that is not a database.
+    // Re-implementing those checks with fs calls would only drift from the
+    // library's. Creating the file when it is absent is the SPEC §14 INITIAL
+    // case, not an error.
+    //
+    // Connectivity stays non-fatal inside the IIFE: a NATS outage must never
+    // hold up or kill Discord. Storage is a local precondition; the network is
+    // not.
+    let dedupStore: DurableEnvelopeDedupStore
+    try {
+      dedupStore = new DurableEnvelopeDedupStore(dedupStorePath)
+    } catch (error) {
+      process.stderr.write(
+        `artifice-discord: fatal FleetBus storage error (FLEET_BUS_DISABLED=0 was set): ${String(error)}\n`,
+      )
+      process.exit(1)
+    }
     const peerRuntimes = parseFleetPeerRuntimes(process.env)
     // FleetBus is optional: never hold Discord startup behind a network await.
     void (async () => {
@@ -978,7 +1001,7 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
           pluginVersion: packageJson.version,
           manifestPath: process.env.FLEET_BUS_MANIFEST_PATH ?? join(homedir(), 'vault', 'infra', 'fleet-manifest.yaml'),
           auditLogPath: process.env.FLEET_BUS_AUDIT_LOG_PATH ?? join(homedir(), '.claude', 'fleet-bus-log.jsonl'),
-          dedupStorePath,
+          dedupStore,
           subscribeBroadcast: process.env.FLEET_BUS_SUBSCRIBE_BROADCAST === '1',
           heartbeatIntervalMs,
           supervisorSleepMs,

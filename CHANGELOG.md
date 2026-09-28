@@ -30,11 +30,32 @@
   operator deserves the error naming the variable instead of one raised from a
   FleetBus constructor.
 
-- **Known operational change, not fixed here:** #47 also removed the implicit
-  `mkdir` for the store's parent directory, so that directory must now pre-exist
-  and be writable. `~/.claude` exists on every live host, so this is not a live
-  problem today; a custom `FLEET_BUS_DEDUP_STORE_PATH` under a fresh directory
-  would need the directory created first.
+- **Unusable storage is now a startup failure, not a silent Discord-only
+  fallback.** With `FLEET_BUS_DISABLED=0`, the store is opened on the same fatal
+  path as the config parse — before the async supervisor block, whose `catch`
+  swallows everything thrown inside it. A missing or unwritable parent
+  directory, or a file that is not a SQLite database, writes a message naming
+  the path and exits 1. Constructing the store *is* the check; the plugin does
+  not re-implement it with `fs` probes that would drift from the library's.
+
+  The opened store — not the path — is handed to `BusRuntime`, so the supervisor
+  cannot open a different store than the one that was validated.
+
+  Two things deliberately stay as they were: an **absent** store file is created
+  rather than rejected (SPEC §14 `INITIAL`), and a **NATS** failure stays
+  non-fatal inside the supervisor. Storage is a local precondition; the network
+  is not, and Discord still never waits on it.
+
+- #47 also removed the implicit `mkdir` for the store's parent directory, so
+  that directory must pre-exist and be writable. `~/.claude` exists on every
+  live host, so this is not a live problem today; a custom
+  `FLEET_BUS_DEDUP_STORE_PATH` under a fresh directory needs the directory
+  created as part of deployment — startup will now say so and exit rather than
+  come up half-dead.
+
+- When the bus is **disabled** none of this runs: no path is resolved and no
+  store is opened, so a broken `FLEET_BUS_DEDUP_STORE_PATH` cannot stop a
+  Discord-only bot from starting.
 
 ## 0.8.2
 

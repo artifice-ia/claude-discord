@@ -134,7 +134,7 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_SUBSCRIBE_BROADCAST` | `0` | Subscribe to `fleet.broadcast.>` when set to `1` |
 | `FLEET_BUS_MANIFEST_PATH` | `~/vault/infra/fleet-manifest.yaml` | YAML source for the accepted `from_claim` bot allowlist |
 | `FLEET_BUS_AUDIT_LOG_PATH` | `~/.claude/fleet-bus-log.jsonl` | Owner-only inbound/drop audit log |
-| `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable. A blank value is rejected at startup, not treated as unset. |
+| `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable — with the bus enabled, storage that cannot be opened exits the process at startup rather than falling back to Discord-only mode. A blank value is rejected at startup, not treated as unset. |
 | `FLEET_BUS_HEARTBEAT_INTERVAL_MS` | `30000` | Heartbeat cadence override |
 | `FLEET_BUS_SUPERVISOR_SLEEP_MS` | `2000` | Supervisor reconnect backoff override |
 | `FLEET_BUS_RATE_WINDOW_MS` | `60000` | Rate-limit window (per-key fixed window) |
