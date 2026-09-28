@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.9.0
+
+- Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#feca116` (yugo #47), which
+  **removes the library's dedup-store default**. The path is now required at
+  every layer: absent, blank, or unusable is a startup failure naming the path,
+  not a store chosen on the caller's behalf. The pin also moves to the canonical
+  repo name — `bazfer/yugo2` resolved only through GitHub's rename redirect.
+
+- **`BusRuntimeConfig` now takes `dedupStore`, a constructed
+  `DurableEnvelopeDedupStore`, and it is required.** The field replaces the
+  optional `dedupStorePath`. This narrows accepted input: a consumer that omits
+  it no longer compiles, which is the point. Nothing in this plugin set a store
+  or a path before, so every bot was running on exactly the default #47 deleted
+  — an optional field would have compiled clean and then failed every startup at
+  runtime, the same shape as `replyToken` in 0.7.4.
+
+- **The store is opened on the fatal startup path, before Discord logs in.**
+  `server.ts` constructs it beside `parseFleetBusStartupConfig`; a failure writes
+  to stderr and exits 1, matching how a bad `FLEET_BUS_MODE` already behaves.
+  Opening SQLite *is* the validation — it creates the schema and throws on a
+  missing or unwritable parent or a file that is not a database — so there is no
+  separate filesystem probe to drift from what the library actually checks.
+  Passing the constructed instance downstream means the supervisor cannot open a
+  different store than the one that was validated.
+
+  Previously the `FleetBus` constructor ran inside a fire-and-forget async block
+  whose `catch` swallowed the error, and `client.login` proceeded regardless: the
+  bot appeared online and healthy with a dead bus. Connectivity stays in that
+  block and remains non-fatal — a NATS outage must never hold up Discord. Only
+  storage moved.
+
+- **Operators keeping an existing store must pass
+  `~/.claude/fleet-bus-dedup-<bot>.sqlite`** — that is the path the removed
+  default produced and where every live bot's claim history already sits. The
+  plugin now supplies it by default via `defaultDedupStorePath(botName)`, built
+  with `homedir()` and never a literal `~`: no filesystem layer expands a tilde,
+  so the string `~/.claude/...` would create a directory named `~` under the
+  process cwd and open a brand-new empty store there. Each plugin instance runs
+  as its own OS user from its own home, so per-user resolution is correct.
+
+- New env knob `FLEET_BUS_DEDUP_STORE_PATH` overrides the store path. Unlike the
+  numeric `FLEET_BUS_*` knobs, a blank or whitespace-only value is **rejected**
+  rather than treated as unset — the library refuses a blank path anyway, and the
+  operator deserves the error naming the variable instead of one raised from a
+  FleetBus constructor.
+
+- **Unusable storage is now a startup failure, not a silent Discord-only
+  fallback.** With `FLEET_BUS_DISABLED=0`, the store is opened on the same fatal
+  path as the config parse — before the async supervisor block, whose `catch`
+  swallows everything thrown inside it. A missing or unwritable parent
+  directory, or a file that is not a SQLite database, writes a message naming
+  the path and exits 1. Constructing the store *is* the check; the plugin does
+  not re-implement it with `fs` probes that would drift from the library's.
+
+  The opened store — not the path — is handed to `BusRuntime`, so the supervisor
+  cannot open a different store than the one that was validated.
+
+  Two things deliberately stay as they were: an **absent** store file is created
+  rather than rejected (SPEC §14 `INITIAL`), and a **NATS** failure stays
+  non-fatal inside the supervisor. Storage is a local precondition; the network
+  is not, and Discord still never waits on it.
+
+- #47 also removed the implicit `mkdir` for the store's parent directory, so
+  that directory must pre-exist and be writable. `~/.claude` exists on every
+  live host, so this is not a live problem today; a custom
+  `FLEET_BUS_DEDUP_STORE_PATH` under a fresh directory needs the directory
+  created as part of deployment — startup will now say so and exit rather than
+  come up half-dead.
+
+- When the bus is **disabled** none of this runs: no path is resolved and no
+  store is opened, so a broken `FLEET_BUS_DEDUP_STORE_PATH` cannot stop a
+  Discord-only bot from starting.
+
 ## 0.8.2
 
 - Bump `@artifice-ia/fleet-bus` to `bazfer/yugo2#5f609e8`, deploying **yugo #26

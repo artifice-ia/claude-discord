@@ -14,7 +14,7 @@ import { JSONCodec, type Msg, type NatsConnection } from 'nats'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BusRuntime, type BusRuntimeConfig } from './fleet-bus-wiring'
+import { BusRuntime, DurableEnvelopeDedupStore, type BusRuntimeConfig } from './fleet-bus-wiring'
 import type { Envelope, FleetBusSessionEvent } from '@artifice-ia/fleet-bus'
 
 const jc = JSONCodec()
@@ -129,7 +129,7 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     pluginVersion: '0.0.0-test',
     manifestPath,
     auditLogPath,
-    dedupStorePath: `${auditLogPath}.dedup.sqlite`,
+    dedupStore: new DurableEnvelopeDedupStore(`${auditLogPath}.dedup.sqlite`),
     subscribeBroadcast: false,
     heartbeatIntervalMs: 20,
     supervisorSleepMs: 10,

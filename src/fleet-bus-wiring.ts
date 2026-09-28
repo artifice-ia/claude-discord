@@ -12,10 +12,13 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildFleetBusFrameMeta,
   buildFleetBusFramePayloadBody,
   defaultRateLimiters,
+  DurableEnvelopeDedupStore,
   escapeFrameIdentifier,
   FleetBus,
   loadFleetManifestAllowlist,
@@ -367,8 +370,26 @@ export interface BusRuntimeConfig {
   pluginVersion: string
   manifestPath: string
   auditLogPath: string
-  /** Override the durable envelope dedup database (primarily for isolation in tests). */
-  dedupStorePath?: string
+  /**
+   * Durable envelope dedup store, already open. **Required, and an instance
+   * rather than a path** — the package removed its
+   * `~/.claude/fleet-bus-dedup-<botName>.sqlite` default in yugo #47 because a
+   * user-global default meant a test run and a live bot shared one durable
+   * store (#29).
+   *
+   * Taking the instance means the caller has already proven the storage works:
+   * constructing a `DurableEnvelopeDedupStore` opens SQLite, creates the schema
+   * and throws on a missing or unwritable parent or a file that is not a
+   * database. server.ts does that on its fatal startup path, so unusable
+   * storage exits the process instead of being swallowed by the supervisor's
+   * catch. Passing the opened store rather than the path also makes it
+   * impossible for the supervisor to open a *different* store than the one
+   * that was validated.
+   *
+   * No optional marker on purpose: omitting it must be a compile error, not a
+   * runtime one (same reasoning as `replyToken` in 0.7.4).
+   */
+  dedupStore: DurableEnvelopeDedupStore
   subscribeBroadcast: boolean
   heartbeatIntervalMs?: number
   supervisorSleepMs?: number
@@ -416,7 +437,7 @@ export class BusRuntime {
       pluginVersion: config.pluginVersion,
       logger: config.logger,
       auditLogPath: config.auditLogPath,
-      ...(config.dedupStorePath !== undefined ? { dedupStorePath: config.dedupStorePath } : {}),
+      dedupStore: config.dedupStore,
       rateLimiters: this.rateLimiters,
       injectIntoSession: async event => {
         const frame = buildInjectionFrame(event)
@@ -561,10 +582,44 @@ export function parseOptionalPositiveInt(raw: string | undefined, name: string):
   return parsed
 }
 
+/**
+ * The durable dedup store path the plugin passes when the operator sets no
+ * override. Must stay byte-for-byte identical to the default the package
+ * removed in yugo #47 (`~/.claude/fleet-bus-dedup-<botName>.sqlite`) — every
+ * live bot's claim history sits in that file, and a different path means a bot
+ * restarts against an empty database.
+ *
+ * `homedir()`, never a literal `~`: neither `bun:sqlite` nor `node:fs` expands
+ * a tilde, so passing the string `~/.claude/...` would create a directory
+ * literally named `~` under the process cwd and open a brand-new empty store
+ * there. Each plugin instance runs as its own OS user from its own home, so
+ * per-user `homedir()` is the correct per-bot resolution.
+ */
+export function defaultDedupStorePath(botName: string): string {
+  return join(homedir(), '.claude', `fleet-bus-dedup-${botName}.sqlite`)
+}
+
+/**
+ * Strict non-blank path env parse. Undefined means "operator left it unset —
+ * use the default." A present-but-blank value is an operator mistake, not an
+ * absence: the package rejects a blank `dedupStorePath` at construction, so
+ * passing it through would trade a clear startup message for one buried in a
+ * FleetBus constructor throw. Whitespace-only is treated the same as empty.
+ */
+export function parseRequiredPathOverride(raw: string | undefined, name: string): string | undefined {
+  if (raw === undefined) return undefined
+  if (raw.trim() === '') {
+    throw new Error(`${name}: expected a non-empty filesystem path, got '${raw}'`)
+  }
+  return raw
+}
+
 export interface FleetBusStartupConfig {
   mode: FleetBusMode
   heartbeatIntervalMs: number | undefined
   supervisorSleepMs: number | undefined
+  /** `undefined` means "use `defaultDedupStorePath(botName)`" — server.ts owns that fallback. */
+  dedupStorePath: string | undefined
 }
 
 /**
@@ -585,9 +640,13 @@ export function parseFleetBusStartupConfig(env: NodeJS.ProcessEnv): FleetBusStar
       env.FLEET_BUS_SUPERVISOR_SLEEP_MS,
       'FLEET_BUS_SUPERVISOR_SLEEP_MS',
     ),
+    dedupStorePath: parseRequiredPathOverride(
+      env.FLEET_BUS_DEDUP_STORE_PATH,
+      'FLEET_BUS_DEDUP_STORE_PATH',
+    ),
   }
 }
 
 // Re-export the package pieces server.ts needs so the import surface stays
 // concentrated in one place.
-export { normalizeBotName, loadFleetManifestAllowlist }
+export { normalizeBotName, loadFleetManifestAllowlist, DurableEnvelopeDedupStore }

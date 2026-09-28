@@ -13,8 +13,8 @@
 
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import {
   appendReplyHint,
   buildClaudeCodeReplyHint,
@@ -26,11 +26,13 @@ import {
   CountingBucket,
   DEFAULT_CLAUDE_BOTS,
   DEFAULT_CODEX_BOTS,
+  defaultDedupStorePath,
   parseFleetBusMode,
   parseFleetBusStartupConfig,
   parseFleetPeerRuntimes,
   parseOptionalPositiveInt,
   parsePeerRuntimeSet,
+  parseRequiredPathOverride,
   readAuditTail,
   wrapRateLimiters,
 } from './fleet-bus-wiring'
@@ -576,6 +578,31 @@ describe('parseFleetBusStartupConfig', () => {
     expect(cfg.supervisorSleepMs).toBe(2147483647)
   })
 
+  test('rejects a blank FLEET_BUS_DEDUP_STORE_PATH instead of falling back', () => {
+    // Deliberately unlike the numeric knobs below, where empty means "unset".
+    // A blank dedup path cannot fall back silently: the package rejects it at
+    // FleetBus construction (yugo #47), so the operator would get the failure
+    // either way — but buried in a constructor throw instead of named here.
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_DEDUP_STORE_PATH: '' }))
+      .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_DEDUP_STORE_PATH: '   ' }))
+      .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
+    expect(() => parseFleetBusStartupConfig({ FLEET_BUS_DEDUP_STORE_PATH: '\t\n' }))
+      .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
+    // Unset is the only way to get the default, and a real path passes through
+    // verbatim — otherwise the guard could be "satisfied" by rejecting everything.
+    expect(parseFleetBusStartupConfig({}).dedupStorePath).toBeUndefined()
+    expect(parseFleetBusStartupConfig({ FLEET_BUS_DEDUP_STORE_PATH: '/srv/dedup-vec.sqlite' }).dedupStorePath)
+      .toBe('/srv/dedup-vec.sqlite')
+  })
+
+  test('parseRequiredPathOverride names the offending env var', () => {
+    expect(() => parseRequiredPathOverride(' ', 'FLEET_BUS_DEDUP_STORE_PATH'))
+      .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
+    expect(parseRequiredPathOverride(undefined, 'X')).toBeUndefined()
+    expect(parseRequiredPathOverride('/tmp/x.sqlite', 'X')).toBe('/tmp/x.sqlite')
+  })
+
   test('empty-string overrides still count as unset (no throw)', () => {
     // Distinct from `'0'` or `'30sec'` — empty means the operator explicitly
     // cleared the var (e.g. a systemd override clearing an inherited value).
@@ -588,5 +615,25 @@ describe('parseFleetBusStartupConfig', () => {
     expect(cfg.mode).toBe('primary')
     expect(cfg.heartbeatIntervalMs).toBeUndefined()
     expect(cfg.supervisorSleepMs).toBeUndefined()
+  })
+})
+
+describe('defaultDedupStorePath', () => {
+  test('resolves an absolute path with no literal tilde', () => {
+    const path = defaultDedupStorePath('vec')
+    // A literal '~' is the trap: neither bun:sqlite nor node:fs expands it, so
+    // `~/.claude/fleet-bus-dedup-vec.sqlite` would create a directory named '~'
+    // under the process cwd and open a brand-new empty store there — the silent
+    // second store this whole change exists to prevent.
+    expect(path).not.toContain('~')
+    expect(isAbsolute(path)).toBe(true)
+  })
+
+  test('matches the default the package removed, byte for byte', () => {
+    // yugo #47 removed `${homedir()}/.claude/fleet-bus-dedup-${botName}.sqlite`.
+    // Every live bot's claim history sits at that exact path; any drift here
+    // starts the bot against an empty database.
+    expect(defaultDedupStorePath('vec')).toBe(`${homedir()}/.claude/fleet-bus-dedup-vec.sqlite`)
+    expect(defaultDedupStorePath('deet')).toBe(`${homedir()}/.claude/fleet-bus-dedup-deet.sqlite`)
   })
 })
