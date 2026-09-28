@@ -8,12 +8,28 @@
   not a store chosen on the caller's behalf. The pin also moves to the canonical
   repo name — `bazfer/yugo2` resolved only through GitHub's rename redirect.
 
-- **`BusRuntimeConfig.dedupStorePath` is now required, not optional.** This
-  narrows accepted input: a consumer that omits it no longer compiles, which is
-  the point. Nothing in this plugin set the field before, so every bot was
-  running on exactly the default #47 deleted — an optional field would have
-  compiled clean and then failed every startup at runtime, the same shape as
-  `replyToken` in 0.7.4.
+- **`BusRuntimeConfig` now takes `dedupStore`, a constructed
+  `DurableEnvelopeDedupStore`, and it is required.** The field replaces the
+  optional `dedupStorePath`. This narrows accepted input: a consumer that omits
+  it no longer compiles, which is the point. Nothing in this plugin set a store
+  or a path before, so every bot was running on exactly the default #47 deleted
+  — an optional field would have compiled clean and then failed every startup at
+  runtime, the same shape as `replyToken` in 0.7.4.
+
+- **The store is opened on the fatal startup path, before Discord logs in.**
+  `server.ts` constructs it beside `parseFleetBusStartupConfig`; a failure writes
+  to stderr and exits 1, matching how a bad `FLEET_BUS_MODE` already behaves.
+  Opening SQLite *is* the validation — it creates the schema and throws on a
+  missing or unwritable parent or a file that is not a database — so there is no
+  separate filesystem probe to drift from what the library actually checks.
+  Passing the constructed instance downstream means the supervisor cannot open a
+  different store than the one that was validated.
+
+  Previously the `FleetBus` constructor ran inside a fire-and-forget async block
+  whose `catch` swallowed the error, and `client.login` proceeded regardless: the
+  bot appeared online and healthy with a dead bus. Connectivity stays in that
+  block and remains non-fatal — a NATS outage must never hold up Discord. Only
+  storage moved.
 
 - **Operators keeping an existing store must pass
   `~/.claude/fleet-bus-dedup-<bot>.sqlite`** — that is the path the removed
