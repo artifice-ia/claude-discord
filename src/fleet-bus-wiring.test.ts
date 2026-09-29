@@ -27,6 +27,7 @@ import {
   DEFAULT_CLAUDE_BOTS,
   DEFAULT_CODEX_BOTS,
   defaultDedupStorePath,
+  defaultDedupVerificationRecordPath,
   parseFleetBusMode,
   parseFleetBusStartupConfig,
   parseFleetPeerRuntimes,
@@ -596,6 +597,21 @@ describe('parseFleetBusStartupConfig', () => {
       .toBe('/srv/dedup-vec.sqlite')
   })
 
+  test('rejects a blank YUGO_DEDUP_VERIFICATION_RECORD instead of falling back', () => {
+    // Same reasoning as the store path. The library reads this variable itself
+    // as `openVerifiedStore`'s default argument, and a blank one reaches it as
+    // a falsy value — surfacing as "missing verification record" with no hint
+    // that the variable was set and empty rather than never set at all.
+    expect(() => parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '' }))
+      .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
+    expect(() => parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '   ' }))
+      .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
+    // Unset means "derive it from the store path"; a real path passes through.
+    expect(parseFleetBusStartupConfig({}).dedupVerificationRecordPath).toBeUndefined()
+    expect(parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '/srv/vec.record.json' })
+      .dedupVerificationRecordPath).toBe('/srv/vec.record.json')
+  })
+
   test('parseRequiredPathOverride names the offending env var', () => {
     expect(() => parseRequiredPathOverride(' ', 'FLEET_BUS_DEDUP_STORE_PATH'))
       .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
@@ -635,5 +651,24 @@ describe('defaultDedupStorePath', () => {
     // starts the bot against an empty database.
     expect(defaultDedupStorePath('vec')).toBe(`${homedir()}/.claude/fleet-bus-dedup-vec.sqlite`)
     expect(defaultDedupStorePath('deet')).toBe(`${homedir()}/.claude/fleet-bus-dedup-deet.sqlite`)
+  })
+})
+
+describe('defaultDedupVerificationRecordPath', () => {
+  test('sits beside the store it attests', () => {
+    expect(defaultDedupVerificationRecordPath('/srv/dedup-vec.sqlite'))
+      .toBe('/srv/dedup-vec.sqlite.verification.json')
+    expect(defaultDedupVerificationRecordPath(defaultDedupStorePath('vec')))
+      .toBe(`${homedir()}/.claude/fleet-bus-dedup-vec.sqlite.verification.json`)
+  })
+
+  test('never collides with the store or its SQLite sidecars', () => {
+    // `yugo dedup provision` refuses a record path equal to the store,
+    // `<store>-wal` or `<store>-shm`, so a default that produced any of those
+    // would be unprovisionable — the operator could never create the file the
+    // plugin then demands.
+    const store = '/srv/dedup-vec.sqlite'
+    const record = defaultDedupVerificationRecordPath(store)
+    expect([store, `${store}-wal`, `${store}-shm`]).not.toContain(record)
   })
 })

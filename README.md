@@ -135,6 +135,7 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_MANIFEST_PATH` | `~/vault/infra/fleet-manifest.yaml` | YAML source for the accepted `from_claim` bot allowlist |
 | `FLEET_BUS_AUDIT_LOG_PATH` | `~/.claude/fleet-bus-log.jsonl` | Owner-only inbound/drop audit log |
 | `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable — with the bus enabled, storage that cannot be opened exits the process at startup rather than falling back to Discord-only mode. A blank value is rejected at startup, not treated as unset. |
+| `YUGO_DEDUP_VERIFICATION_RECORD` | `<store>.verification.json` | Path to the operator-attested verification record that binds the dedup store (yugo Release 2, SPEC-26 §8.2). The library reads this variable itself, so the plugin resolves it and sets it before opening the store. **The plugin never creates it** — self-attestation is not attestation, so an absent store or an absent record exits the process at startup with a message naming both paths. A blank value is rejected at startup, not treated as unset. See [Provisioning the dedup store](#provisioning-the-dedup-store). |
 | `FLEET_BUS_HEARTBEAT_INTERVAL_MS` | `30000` | Heartbeat cadence override |
 | `FLEET_BUS_SUPERVISOR_SLEEP_MS` | `2000` | Supervisor reconnect backoff override |
 | `FLEET_BUS_RATE_WINDOW_MS` | `60000` | Rate-limit window (per-key fixed window) |
@@ -160,6 +161,52 @@ the same prompt-injection precautions as any external channel.
 
 The plugin runs FleetBus under a supervisor loop that reconnects across NATS
 blips (SPEC §1.7). On session shutdown the supervisor is stopped cleanly.
+
+### Provisioning the dedup store
+
+yugo Release 2 will not open a file-backed dedup store that no operator has
+attested (SPEC-26 §8.2). The plugin resolves the record path, sets
+`YUGO_DEDUP_VERIFICATION_RECORD` and opens the store on its fatal startup path —
+it never creates the store or the record, because self-attestation is not
+attestation. With the bus enabled, an unprovisioned bot exits 1 before Discord
+login, naming the store, the record path it expected, and this procedure.
+
+Provisioning is interactive and deliberately so: `yugo dedup provision` makes the
+operator type `STOPPED`, paste inspected storage evidence, type `ATTEST`, and
+pass `--attested-by`. None of it can be scripted into a deployment.
+
+The CLI ships inside the installed package — `node_modules/@artifice-ia/fleet-bus/bin/yugo`
+— because bun's git install does not honour the package's `files` allowlist.
+
+**An existing store from 0.9.0 or earlier has six columns; Release 2 needs
+eight, so it must be migrated before it can be attested.** Per store, with every
+accessor of that store stopped *and prevented from restarting*:
+
+```sh
+YUGO=node_modules/@artifice-ia/fleet-bus/bin/yugo
+STORE=~/.claude/fleet-bus-dedup-<bot>.sqlite
+
+# 1. Migrate six columns to eight. Takes an O_EXCL backup first; the backup path
+#    must not already exist. That backup is the rollback artifact — keep it.
+"$YUGO" dedup migrate --store "$STORE" --backup "$STORE.pre-r2.bak" --port typescript
+
+# 2. Attest the migrated store. --record-only means "do not create a store".
+"$YUGO" dedup provision --store "$STORE" --record "$STORE.verification.json" \
+  --port typescript --record-only --attested-by "<operator>"
+```
+
+A brand-new store omits step 1 and drops `--record-only`, which creates the
+store and attests it in one pass.
+
+Check the line the command prints at the end: `Record written (uuid binding)` is
+what you want. A `devno` binding records the boot id it was taken under and must
+be re-attested after every reboot; the UUID binding survives one. The tool picks
+UUID whenever `/dev/disk/by-uuid` resolves the store's device, so a `devno`
+result means that lookup failed and is worth investigating before accepting.
+
+**Rollback:** stop the bot, restore `$STORE.pre-r2.bak` over `$STORE` (removing
+the `-wal`/`-shm` sidecars), delete the verification record, and pin the plugin
+back to the pre-Release-2 `@artifice-ia/fleet-bus`.
 
 ### Fleet-bus MCP tools
 

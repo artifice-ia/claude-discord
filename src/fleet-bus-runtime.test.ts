@@ -129,7 +129,13 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     pluginVersion: '0.0.0-test',
     manifestPath,
     auditLogPath,
-    dedupStore: new DurableEnvelopeDedupStore(`${auditLogPath}.dedup.sqlite`),
+    // `:memory:` rather than a file beside the audit log. These tests exercise
+    // the supervisor and injection wiring, never durability across processes,
+    // and yugo Release 2 refuses a file-backed store without an
+    // operator-attested verification record (SPEC-26 §8.2) — which a test must
+    // not mint for itself. `openVerifiedStore` still accepts `:memory:` without
+    // a record, so this is the library's own supported no-durability mode.
+    dedupStore: new DurableEnvelopeDedupStore(':memory:'),
     subscribeBroadcast: false,
     heartbeatIntervalMs: 20,
     supervisorSleepMs: 10,

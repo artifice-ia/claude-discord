@@ -600,6 +600,27 @@ export function defaultDedupStorePath(botName: string): string {
 }
 
 /**
+ * The operator-attested verification record for a given store, when the
+ * operator sets no override (yugo #58, SPEC-26 §8.2). Release 2 refuses any
+ * file-backed store without one, so every bot needs this path resolved — a
+ * default derived from the store keeps store and record as a single deployment
+ * unit, and matches the `<store>.verification.json` convention yugo's own
+ * fixtures use.
+ *
+ * A derived default is not a silent fallback: the record file itself is never
+ * created by a consumer (SPEC-26 §8.2 forbids self-attestation), so an
+ * unprovisioned bot still fails loudly at startup. What the default removes is
+ * a second env var every unit file would otherwise have to repeat.
+ *
+ * Deliberately NOT the store path or its SQLite sidecars — `yugo dedup
+ * provision` refuses a record that would overwrite `<store>`, `<store>-wal` or
+ * `<store>-shm`, so the default has to avoid all three.
+ */
+export function defaultDedupVerificationRecordPath(storePath: string): string {
+  return `${storePath}.verification.json`
+}
+
+/**
  * Strict non-blank path env parse. Undefined means "operator left it unset —
  * use the default." A present-but-blank value is an operator mistake, not an
  * absence: the package rejects a blank `dedupStorePath` at construction, so
@@ -620,6 +641,12 @@ export interface FleetBusStartupConfig {
   supervisorSleepMs: number | undefined
   /** `undefined` means "use `defaultDedupStorePath(botName)`" — server.ts owns that fallback. */
   dedupStorePath: string | undefined
+  /**
+   * `undefined` means "use `defaultDedupVerificationRecordPath(storePath)`" —
+   * server.ts owns that fallback, because the default is derived from the
+   * already-resolved store path rather than from the environment.
+   */
+  dedupVerificationRecordPath: string | undefined
 }
 
 /**
@@ -643,6 +670,16 @@ export function parseFleetBusStartupConfig(env: NodeJS.ProcessEnv): FleetBusStar
     dedupStorePath: parseRequiredPathOverride(
       env.FLEET_BUS_DEDUP_STORE_PATH,
       'FLEET_BUS_DEDUP_STORE_PATH',
+    ),
+    // Named for the package, not the plugin: the library reads this exact
+    // variable off `process.env` as `openVerifiedStore`'s default argument, and
+    // `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` exposes no
+    // parameter channel for it. Parsing it here gives a blank value the same
+    // named rejection the store path gets, instead of a bare "missing
+    // verification record" raised three frames down.
+    dedupVerificationRecordPath: parseRequiredPathOverride(
+      env.YUGO_DEDUP_VERIFICATION_RECORD,
+      'YUGO_DEDUP_VERIFICATION_RECORD',
     ),
   }
 }

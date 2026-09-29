@@ -32,7 +32,7 @@ import {
 } from 'discord.js'
 import { randomBytes } from 'crypto'
 import { execSync } from 'child_process'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { VoiceManager, requiredVoiceUserId, voiceUserName } from './voice'
@@ -41,6 +41,7 @@ import {
   appendReplyHint,
   buildReplyHint,
   defaultDedupStorePath,
+  defaultDedupVerificationRecordPath,
   DurableEnvelopeDedupStore,
   loadFleetManifestAllowlist,
   normalizeBotName,
@@ -965,27 +966,62 @@ if (process.env.FLEET_BUS_DISABLED === '0') {
     // is built with homedir(), never a literal '~', which no fs layer expands.
     // #47 also dropped the implicit mkdir: the parent directory must pre-exist.
     const dedupStorePath = startupConfig.dedupStorePath ?? defaultDedupStorePath(botName)
+    // yugo Release 2 (SPEC-26 §8.2) refuses any file-backed store that is not
+    // bound to an operator-attested verification record. The library reads the
+    // record path from `YUGO_DEDUP_VERIFICATION_RECORD` as `openVerifiedStore`'s
+    // default argument, and `DurableEnvelopeDedupStore(path, ttlMs?,
+    // leaseMsValue?)` offers no parameter to pass it — so the plugin resolves
+    // the path here and puts it back on the environment the library reads.
+    // Assigning unconditionally means the value the library sees is the value
+    // this block resolved, whether it came from the operator or the default.
+    const dedupRecordPath =
+      startupConfig.dedupVerificationRecordPath ?? defaultDedupVerificationRecordPath(dedupStorePath)
+    process.env.YUGO_DEDUP_VERIFICATION_RECORD = dedupRecordPath
+    // A function declaration, not a const arrow: TypeScript only treats a call
+    // as terminating control flow when the callee has an explicit `never`
+    // return on its declaration, and that is what keeps `dedupStore` definitely
+    // assigned below.
+    function fatalStorage(detail: string): never {
+      process.stderr.write(
+        `artifice-discord: fatal FleetBus storage error (FLEET_BUS_DISABLED=0 was set): ${detail}\n` +
+          `artifice-discord:   dedup store:         ${dedupStorePath}\n` +
+          `artifice-discord:   verification record: ${dedupRecordPath}\n` +
+          'artifice-discord:   fix: stop every accessor of the store, then run `yugo dedup provision` ' +
+          '(see the fleet-bus README for the migrate-then-attest order on an existing store).\n',
+      )
+      process.exit(1)
+    }
+
     // Storage joins the fatal path next to the config parse, and deliberately
     // NOT the async block below: that block's catch swallows every throw, so a
     // store opened there would leave Discord running with a silently dead bus
-    // and nothing downstream any wiser. Constructing the store IS the
-    // validation — it opens SQLite, creates the schema, and throws naming the
-    // path on a missing or unwritable parent or a file that is not a database.
-    // Re-implementing those checks with fs calls would only drift from the
-    // library's. Creating the file when it is absent is the SPEC §14 INITIAL
-    // case, not an error.
+    // and nothing downstream any wiser.
+    //
+    // The two checks below are not a re-implementation of the library's
+    // verification — they classify the only two conditions its own message
+    // cannot tell apart. Release 2 opens with `create: false`, so an absent
+    // store and an unattested store both surface as "missing verification
+    // record" when neither file exists, and the operator cannot tell which one
+    // to fix. Everything past existence — canonical path, inode, device,
+    // schema fingerprint, WAL — stays the library's to judge.
     //
     // Connectivity stays non-fatal inside the IIFE: a NATS outage must never
     // hold up or kill Discord. Storage is a local precondition; the network is
     // not.
+    if (!existsSync(dedupStorePath)) {
+      // SPEC-26 §8.2 supersedes SPEC §14 INITIAL here: a consumer must never
+      // create, refresh or repair its own store or record. First boot against
+      // an unprovisioned path is a refusal, not a creation.
+      fatalStorage('dedup store does not exist, and Release 2 consumers never create one')
+    }
+    if (!existsSync(dedupRecordPath)) {
+      fatalStorage('dedup store is not attested: no verification record at the expected path')
+    }
     let dedupStore: DurableEnvelopeDedupStore
     try {
       dedupStore = new DurableEnvelopeDedupStore(dedupStorePath)
     } catch (error) {
-      process.stderr.write(
-        `artifice-discord: fatal FleetBus storage error (FLEET_BUS_DISABLED=0 was set): ${String(error)}\n`,
-      )
-      process.exit(1)
+      fatalStorage(String(error))
     }
     const peerRuntimes = parseFleetPeerRuntimes(process.env)
     // FleetBus is optional: never hold Discord startup behind a network await.

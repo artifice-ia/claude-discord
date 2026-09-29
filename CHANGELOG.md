@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.9.1
+
+- Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#8a7dcfe` (yugo Release 2, #48).
+  A type-only check passes clean across this bump — `tsc --noEmit` is green and
+  the export surface is unchanged — while every bot's startup breaks. The
+  contract that moved is a runtime one.
+
+- **Reverses 0.9.0's "an absent store file is created rather than rejected
+  (SPEC §14 `INITIAL`)".** That sentence no longer describes shipped behaviour
+  and is superseded by SPEC-26 §8.2: a consumer must never create, refresh or
+  repair its own dedup store or its verification record, because
+  self-attestation is not attestation. There is no `--force`, no "accept
+  current values on mismatch", and no first-run auto-generation. Release 2
+  opens the store with `create: false`, so first boot against an unprovisioned
+  path now refuses instead of quietly starting a fresh, empty dedup history.
+
+  The two `src/server-startup.test.ts` tests that encoded the old contract were
+  rewritten to the new one rather than relaxed: an absent store is fatal and is
+  still absent afterwards, and a present-but-unattested store is fatal with a
+  message the operator can tell apart from the absent case.
+
+- **New env knob `YUGO_DEDUP_VERIFICATION_RECORD`**, parsed by
+  `parseFleetBusStartupConfig` alongside the other startup knobs and defaulting
+  to `<store>.verification.json`. It is named for the package rather than the
+  plugin because the package reads that exact variable off `process.env` as
+  `openVerifiedStore`'s default argument;
+  `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` has no parameter to
+  pass a record through, so the environment is the only channel. `server.ts`
+  resolves the path and assigns the variable immediately before constructing
+  the store, so the value the library sees is the value the plugin resolved.
+
+  A derived default is not a silent fallback: nothing in the plugin can produce
+  the record, so an unprovisioned bot still fails at startup. What the default
+  removes is a second path every unit file would otherwise have to keep in sync
+  with `FLEET_BUS_DEDUP_STORE_PATH`. A blank value is rejected by name, like the
+  store path.
+
+- **The startup failure now names both paths and the fix.** `server.ts`
+  classifies the two conditions the library's own message cannot distinguish —
+  an absent store and an unattested one both surface as "missing verification
+  record" — and prints the store path, the expected record path and the
+  `yugo dedup provision` step. Everything past file existence (canonical path,
+  inode, device binding, schema fingerprint, WAL) stays the library's to judge;
+  the plugin does not re-implement it.
+
+- **Operators must migrate and attest each live store before deploying this
+  version.** The live stores have six columns and Release 2 requires eight, so
+  the order is `yugo dedup migrate` and then
+  `yugo dedup provision --record-only` — provisioning alone refuses an
+  unmigrated store. `migrate()` takes an `O_EXCL` backup before it touches
+  anything, and that backup is the rollback artifact. See "Provisioning the
+  dedup store" in the README. Discarding the existing rows instead of migrating
+  is not free: dedup state is what closes the re-delivery window.
+
+- Runtime tests now build their `dedupStore` as `:memory:`. They exercise the
+  supervisor and injection wiring, never durability across processes, and
+  `openVerifiedStore` still accepts `:memory:` without a record — so the fixture
+  uses the library's own supported no-durability mode rather than minting an
+  attestation for itself.
+
+- **Host-qualification gate inherited from Release 2, unchanged by this
+  release.** `monotonic-clock.ts` refuses any host that is not Linux x86_64 with
+  glibc exactly 2.39 and Bun exactly 1.3.12, and `engines.bun` tightened from
+  `>=1.3.0` to `1.3.12`. A future Bun upgrade is a startup failure, not a
+  warning. Recorded here so it is not rediscovered during an incident.
+
 ## 0.9.0
 
 - Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#feca116` (yugo #47), which
