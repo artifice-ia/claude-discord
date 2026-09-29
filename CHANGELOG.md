@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.9.1
+## 0.10.0
+
+- **Minor bump, not a patch.** CONTRIBUTING reserves `0.X.0` for new features
+  or breaking changes, and reversing the startup contract is a breaking change:
+  a bot that started yesterday refuses to start today until its store is
+  migrated and attested and its configuration names a record. Three artifacts
+  carry the version — `package.json`, `.claude-plugin/plugin.json` and this
+  file's heading — and `src/plugin-manifest.test.ts` now asserts all three
+  agree. `/plugin update` compares the *manifest* version, so a release that
+  bumps only `package.json` never reaches an installed bot; the update simply
+  never fires.
 
 - Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#8a7dcfe` (yugo Release 2, #48).
   A type-only check passes clean across this bump — `tsc --noEmit` is green and
@@ -69,6 +79,43 @@
   anything, and that backup is the rollback artifact. See "Provisioning the
   dedup store" in the README. Discarding the existing rows instead of migrating
   is not free: dedup state is what closes the re-delivery window.
+
+- **Rollback rolls back the plugin, not just the dependency.** Re-pinning
+  `@artifice-ia/fleet-bus` to `feca116` on its own does not work: this
+  `server.ts` requires `YUGO_DEDUP_VERIFICATION_RECORD` and runs its own
+  record-existence preflight, and neither lives in the dependency. A
+  dependency-only rollback exits 1 on the unset variable — it fails in precisely
+  the situation it exists for. The target is **plugin 0.9.0 (`cd5a601`)**, which
+  pins `feca116` itself.
+
+  Verified by running that build against a restored six-column store with no
+  verification record and the variable unset: clean startup, exit 0, restored
+  row intact. The same configuration against this version exits 1. Accessors
+  stay stopped and prevented from restarting for the **whole** procedure, not
+  just the file swap.
+
+  Two costs remain unrecoverable: dedup rows written after cutover are lost with
+  the pre-migration snapshot, reopening the re-delivery window for exactly those
+  envelopes, and `feca116` returns to wall-clock leases, giving up the monotonic
+  fencing Release 2 exists to provide. **Rolling back after the bot has taken
+  traffic is an operator decision accepting both. Aborting before any envelope
+  has been processed is not the same decision and carries neither cost.**
+
+- **Re-attestation is a lifecycle obligation, now documented as one.** The
+  README carries SPEC-26 §8.5's dispositions rather than only the
+  reboot/`devno` case: a store **restored from backup or recreated**, and **any
+  change to the accessor inventory**, each require fresh inspection and
+  re-attestation. §8.5 is explicit that restoration is not reliably detectable —
+  an in-place restore can preserve the inode and every binding and therefore
+  pass every startup check — so **a successful startup is not evidence the
+  obligation was met**. The section links the authoritative spec.
+
+- **A blank `YUGO_DEDUP_VERIFICATION_RECORD` is rejected even in `:memory:`
+  mode**, because config parsing runs before the store mode is chosen. Its
+  *value* is never consulted for a `:memory:` store and leaving it unset there
+  is correct; a blank one is a typo either way, and is reported as a config
+  error rather than a storage error. Documented and tested rather than left as a
+  discrepancy between the README table and the code.
 
 - Runtime tests now build their `dedupStore` as `:memory:`. They exercise the
   supervisor and injection wiring, never durability across processes, and

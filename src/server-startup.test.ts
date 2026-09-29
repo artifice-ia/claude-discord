@@ -13,7 +13,7 @@
  * verification record (SPEC-26 §8.2), and the plugin may not create either the
  * store or the record. Two assertions here previously encoded the opposite
  * (SPEC §14 `INITIAL`: first boot creates its own store); they now encode the
- * attestation contract that supersedes it. See CHANGELOG 0.9.1.
+ * attestation contract that supersedes it. See CHANGELOG 0.10.0.
  *
  * Everything runs against a throwaway HOME and state dir; no test touches the
  * operator's real `~/.claude`. The Discord token is deliberately bogus: these
@@ -199,21 +199,40 @@ function busEnv(home: string, dedupPath: string, record: string | null): Record<
 }
 
 describe('fleet-bus dedup store preflight (server.ts startup)', () => {
-  test('missing parent directory is fatal', () => {
+  test('an absent store under a missing parent is refused without creating directories', () => {
+    // Under `create: false` a missing parent is no longer a failure mode of its
+    // own — the store simply cannot exist, so this lands on the absent-store
+    // branch. What it still proves, and the absent-store test cannot, is that
+    // refusing does not reach for `mkdir`: yugo #47 removed the implicit
+    // directory creation, and a plugin that quietly restored it would leave an
+    // empty tree beside every misconfigured bot.
     const home = makeHome()
     try {
-      const dedup = join(home, 'no-such-dir', 'dedup.sqlite')
+      const parent = join(home, 'no-such-dir')
+      const dedup = join(parent, 'dedup.sqlite')
+      expect(existsSync(parent)).toBe(false)
       const { status, stderr } = runServer(home, busEnv(home, dedup, `${dedup}.verification.json`))
       expect(stderr).toContain(FATAL_STORAGE)
+      expect(stderr).toContain(ABSENT_STORE)
       expect(stderr).toContain(dedup)
       expect(status).toBe(1)
       expect(existsSync(dedup)).toBe(false)
+      // The parent is untouched — nothing was created on the way to refusing.
+      expect(existsSync(parent)).toBe(false)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
   }, 20000)
 
-  test('unwritable parent directory is fatal', () => {
+  // `chmod 0o500` does not stop root, which ignores directory write
+  // permissions entirely — as root this test would provision a store, fail to
+  // make the directory unwritable, and then pass or fail for reasons that have
+  // nothing to do with permissions. Skipping loudly beats reporting a
+  // root-owned pass as permission proof. CI runs unprivileged, so this is about
+  // a local `sudo bun test`, not the pipeline.
+  const permissionTest = process.getuid?.() === 0 ? test.skip : test
+
+  permissionTest('unwritable parent directory is fatal', () => {
     // The store and its record both exist and are attested, so both advisory
     // existence checks pass and the failure has to come from the library's own
     // `accessSync(dir, W_OK)` precondition. A read-only parent is still fatal
@@ -399,6 +418,30 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
       // Nothing was created on disk under that name.
       expect(existsSync(join(home, '.claude', ':memory:'))).toBe(false)
       expect(existsSync(':memory:')).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  test("a blank record variable is rejected even in ':memory:' mode", () => {
+    // Memory mode never *consults* the record, but a blank value is still an
+    // operator mistake and is rejected before the store mode is even chosen —
+    // `parseFleetBusStartupConfig` runs first and treats blank as a typo rather
+    // than as unset, exactly as it does for FLEET_BUS_DEDUP_STORE_PATH. So this
+    // is a CONFIG error, not a storage one, and the distinction is what tells
+    // the operator the variable is set-but-empty rather than absent.
+    const home = makeHome()
+    try {
+      const { status, stderr } = runServer(home, {
+        ...busEnv(home, ':memory:', null),
+        YUGO_DEDUP_VERIFICATION_RECORD: '   ',
+      })
+      expect(stderr).toContain('fatal FleetBus config error')
+      expect(stderr).toContain('YUGO_DEDUP_VERIFICATION_RECORD')
+      expect(stderr).toContain('expected a non-empty filesystem path')
+      // Not misattributed to storage — memory mode has no storage problem.
+      expect(stderr).not.toContain(FATAL_STORAGE)
+      expect(status).toBe(1)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

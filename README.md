@@ -135,7 +135,7 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_MANIFEST_PATH` | `~/vault/infra/fleet-manifest.yaml` | YAML source for the accepted `from_claim` bot allowlist |
 | `FLEET_BUS_AUDIT_LOG_PATH` | `~/.claude/fleet-bus-log.jsonl` | Owner-only inbound/drop audit log |
 | `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable — with the bus enabled, storage that cannot be opened exits the process at startup rather than falling back to Discord-only mode. A blank value is rejected at startup, not treated as unset. Set it to `:memory:` for a bot that wants no durable dedup history — the package's own no-durability mode, which needs no verification record. |
-| `YUGO_DEDUP_VERIFICATION_RECORD` | **none — required when the store is file-backed** | Explicit path to the operator-attested verification record that binds the dedup store (yugo Release 2, SPEC-26 §8.2). The library reads this variable itself, so the plugin validates it and sets it before opening the store. **There is deliberately no default.** §8.2 requires an explicit path and says unset, with a file-backed store configured, must refuse consumption — and a `<store>.verification.json` convention would silently adopt a stale record left beside the store by an earlier provisioning. With the bus enabled and a file-backed store, unset is a fatal startup error naming this variable; so are an absent store and an absent record, each with its own message. A blank value is rejected rather than treated as unset. Not consulted when the store is `:memory:`. See [Provisioning the dedup store](#provisioning-the-dedup-store). |
+| `YUGO_DEDUP_VERIFICATION_RECORD` | **none — required when the store is file-backed** | Explicit path to the operator-attested verification record that binds the dedup store (yugo Release 2, SPEC-26 §8.2). The library reads this variable itself, so the plugin validates it and sets it before opening the store. **There is deliberately no default.** §8.2 requires an explicit path and says unset, with a file-backed store configured, must refuse consumption — and a `<store>.verification.json` convention would silently adopt a stale record left beside the store by an earlier provisioning. With the bus enabled and a file-backed store, unset is a fatal startup error naming this variable; so are an absent store and an absent record, each with its own message. A blank value is rejected rather than treated as unset, and that rejection happens during config parsing — **before** the store mode is considered, so a blank value is a fatal config error even when the store is `:memory:`. Its *value* is never consulted in `:memory:` mode, and leaving it unset there is correct. See [Provisioning the dedup store](#provisioning-the-dedup-store). |
 | `FLEET_BUS_HEARTBEAT_INTERVAL_MS` | `30000` | Heartbeat cadence override |
 | `FLEET_BUS_SUPERVISOR_SLEEP_MS` | `2000` | Supervisor reconnect backoff override |
 | `FLEET_BUS_RATE_WINDOW_MS` | `60000` | Rate-limit window (per-key fixed window) |
@@ -214,20 +214,75 @@ be re-attested after every reboot; the UUID binding survives one. The tool picks
 UUID whenever `/dev/disk/by-uuid` resolves the store's device, so a `devno`
 result means that lookup failed and is worth investigating before accepting.
 
+#### Re-attestation is a lifecycle obligation, not a one-off
+
+A record is evidence about a moment. SPEC-26
+[§8.5](https://github.com/bazfer/yugo/blob/8a7dcfe/docs/SPEC-26-clock-step-lease-fencing.md#85-provisioning-and-lifecycle)
+is the authoritative list; the cases that bite an operator running this plugin:
+
+| Situation | Disposition |
+| --- | --- |
+| Store **restored from backup, or recreated** | **Re-attest.** Required operationally, and see the warning below. |
+| Reboot, `binding: "uuid"` | No action while the bindings still match. |
+| Reboot, `binding: "devno"` | **Re-attest** — device numbers may have changed. |
+| **Accessor set changed** | **Re-attest.** The participant inventory is part of the evidence, so adding, removing or relocating any process that opens the store makes the record stale. |
+| Store moved to another filesystem | Device mismatch; startup refuses. Re-provision. |
+| Container recreated, same bind-mounted store | Bindings unchanged; passes. |
+| Release 2 column migration | The migrate-then-attest procedure above. |
+
+**A successful startup is not evidence the obligation was met.** §8.5 is explicit
+that restoration is not reliably detectable: an in-place restore can preserve the
+inode and every binding, so it passes every startup check while the record now
+attests storage that no longer exists in the state it described. The same is true
+of an accessor-set change, which the filesystem cannot see at all. Re-attestation
+after a restore or an inventory change is an operator obligation the software
+cannot enforce and will not remind you about.
+
+Re-attesting an existing, already-eight-column store is `yugo dedup provision`
+with `--record-only`, exactly as in step 2 above.
+
 #### Rolling back
 
-Rollback is not a pin change alone. In order:
+**Roll back the plugin, not just the dependency.** Re-pinning
+`@artifice-ia/fleet-bus` to `feca116` on its own does not work: this version of
+`server.ts` requires `YUGO_DEDUP_VERIFICATION_RECORD` and runs its own
+record-existence preflight, and neither is in the dependency. A dependency-only
+rollback exits 1 on the unset variable — that is, it fails in exactly the
+situation it exists for. The rollback target is **plugin 0.9.0 (commit
+`cd5a601`), which pins `feca116` itself.**
 
-1. **Stop every accessor of the store and prevent it from restarting** — the
-   same precondition as the migration, for the same reason: two processes
-   disagreeing about the schema is how a store gets corrupted. `migrate()`'s own
-   docstring makes this the caller's obligation, and no tool can prove it.
-2. Restore `$STORE.pre-r2.bak` over `$STORE`, and delete the `-wal`/`-shm`
+Rolling back after the bot has taken live traffic **discards dedup history and
+weakens lease fencing** (below). That is an operator decision, and it has to be
+made explicitly. Aborting *before* the rolled-forward bot has processed any
+envelope carries neither cost — there is nothing in the store that the backup
+does not already have — so a pre-traffic abort is not the same decision and does
+not need the same deliberation.
+
+**Every accessor of the store must stay stopped, and prevented from restarting,
+for the whole procedure** — not just across the file swap. A session that comes
+back up between steps 3 and 5 opens the store under the wrong plugin version.
+
+1. Stop every accessor and prevent restart. Confirm it, by inspection, rather
+   than assuming it.
+2. If the bot has taken traffic since cutover, make the decision above
+   explicitly and record who made it.
+3. Restore `$STORE.pre-r2.bak` over `$STORE`, and delete the `-wal`/`-shm`
    sidecars — a stale WAL against a restored database replays changes the
    restored file never made.
-3. Delete the verification record and unset `YUGO_DEDUP_VERIFICATION_RECORD`.
-4. Pin `@artifice-ia/fleet-bus` back to the pre-Release-2 commit (`feca116`) and
-   reinstall.
+4. Delete the verification record, and unset `YUGO_DEDUP_VERIFICATION_RECORD`
+   wherever it was set (unit file, compose env, `.env`) — not just in the
+   current shell.
+5. **Roll the plugin back to 0.9.0** (`cd5a601`) and reinstall, so
+   `@artifice-ia/fleet-bus` resolves to `feca116`. `/plugin update` compares
+   version strings, so confirm the installed manifest reads `0.9.0` before
+   restarting anything.
+6. Restart accessors.
+
+Verified by execution rather than by reading, on 2026-09-29: plugin `cd5a601`
+with `feca116`, pointed at a restored six-column store, with no verification
+record present and `YUGO_DEDUP_VERIFICATION_RECORD` unset, reaches its normal
+`shutting down` and exits 0; the restored row survives unmodified. The same
+configuration against this version exits 1 on the unset variable.
 
 Two costs, both real, neither recoverable afterwards:
 
