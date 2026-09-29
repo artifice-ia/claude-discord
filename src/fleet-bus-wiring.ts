@@ -600,6 +600,18 @@ export function defaultDedupStorePath(botName: string): string {
 }
 
 /**
+ * The package's no-durability store sentinel. `openVerifiedStore` creates a
+ * fresh in-memory schema for exactly this string and returns before it consults
+ * any verification record, so a `:memory:` store is outside the attestation
+ * contract entirely (SPEC-26 §8.2 binds *file-backed* stores).
+ *
+ * Exported so server.ts and its tests compare against one constant rather than
+ * three copies of a magic string, and matched exactly — the package itself uses
+ * `path !== ':memory:'`, so no other spelling is exempt.
+ */
+export const IN_MEMORY_DEDUP_STORE = ':memory:'
+
+/**
  * Strict non-blank path env parse. Undefined means "operator left it unset —
  * use the default." A present-but-blank value is an operator mistake, not an
  * absence: the package rejects a blank `dedupStorePath` at construction, so
@@ -620,6 +632,13 @@ export interface FleetBusStartupConfig {
   supervisorSleepMs: number | undefined
   /** `undefined` means "use `defaultDedupStorePath(botName)`" — server.ts owns that fallback. */
   dedupStorePath: string | undefined
+  /**
+   * `undefined` means the operator did not set it. There is no default:
+   * SPEC-26 §8.2 requires an explicit path and says that unset, with a
+   * file-backed store configured, must refuse consumption. server.ts owns that
+   * refusal, because only it knows whether the resolved store is file-backed.
+   */
+  dedupVerificationRecordPath: string | undefined
 }
 
 /**
@@ -643,6 +662,16 @@ export function parseFleetBusStartupConfig(env: NodeJS.ProcessEnv): FleetBusStar
     dedupStorePath: parseRequiredPathOverride(
       env.FLEET_BUS_DEDUP_STORE_PATH,
       'FLEET_BUS_DEDUP_STORE_PATH',
+    ),
+    // Named for the package, not the plugin: the library reads this exact
+    // variable off `process.env` as `openVerifiedStore`'s default argument, and
+    // `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` exposes no
+    // parameter channel for it. Parsing it here gives a blank value the same
+    // named rejection the store path gets, instead of a bare "missing
+    // verification record" raised three frames down.
+    dedupVerificationRecordPath: parseRequiredPathOverride(
+      env.YUGO_DEDUP_VERIFICATION_RECORD,
+      'YUGO_DEDUP_VERIFICATION_RECORD',
     ),
   }
 }

@@ -27,6 +27,8 @@ import {
   DEFAULT_CLAUDE_BOTS,
   DEFAULT_CODEX_BOTS,
   defaultDedupStorePath,
+  DurableEnvelopeDedupStore,
+  IN_MEMORY_DEDUP_STORE,
   parseFleetBusMode,
   parseFleetBusStartupConfig,
   parseFleetPeerRuntimes,
@@ -596,6 +598,23 @@ describe('parseFleetBusStartupConfig', () => {
       .toBe('/srv/dedup-vec.sqlite')
   })
 
+  test('rejects a blank YUGO_DEDUP_VERIFICATION_RECORD instead of falling back', () => {
+    // Same reasoning as the store path. The library reads this variable itself
+    // as `openVerifiedStore`'s default argument, and a blank one reaches it as
+    // a falsy value — surfacing as "missing verification record" with no hint
+    // that the variable was set and empty rather than never set at all.
+    expect(() => parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '' }))
+      .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
+    expect(() => parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '   ' }))
+      .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
+    // Unset stays undefined — there is no default (SPEC-26 §8.2); server.ts
+    // turns that into a refusal for a file-backed store. A real path passes
+    // through, so the guard is not "satisfied" by rejecting everything.
+    expect(parseFleetBusStartupConfig({}).dedupVerificationRecordPath).toBeUndefined()
+    expect(parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '/srv/vec.record.json' })
+      .dedupVerificationRecordPath).toBe('/srv/vec.record.json')
+  })
+
   test('parseRequiredPathOverride names the offending env var', () => {
     expect(() => parseRequiredPathOverride(' ', 'FLEET_BUS_DEDUP_STORE_PATH'))
       .toThrow('FLEET_BUS_DEDUP_STORE_PATH')
@@ -635,5 +654,22 @@ describe('defaultDedupStorePath', () => {
     // starts the bot against an empty database.
     expect(defaultDedupStorePath('vec')).toBe(`${homedir()}/.claude/fleet-bus-dedup-vec.sqlite`)
     expect(defaultDedupStorePath('deet')).toBe(`${homedir()}/.claude/fleet-bus-dedup-deet.sqlite`)
+  })
+})
+
+describe('IN_MEMORY_DEDUP_STORE', () => {
+  test('is the exact sentinel the package matches on', () => {
+    // The package tests `path !== ':memory:'` in both
+    // `DurableEnvelopeDedupStore` and `openVerifiedStore`. Any other spelling
+    // is a file-backed path and stays inside the attestation contract, so this
+    // constant must not drift into something friendlier.
+    expect(IN_MEMORY_DEDUP_STORE).toBe(':memory:')
+    expect(new DurableEnvelopeDedupStore(IN_MEMORY_DEDUP_STORE)).toBeDefined()
+  })
+
+  test('is never what defaultDedupStorePath produces', () => {
+    // A bot whose default store silently resolved to the in-memory sentinel
+    // would lose its dedup history across every restart without a word.
+    expect(defaultDedupStorePath('vec')).not.toBe(IN_MEMORY_DEDUP_STORE)
   })
 })

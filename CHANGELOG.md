@@ -1,5 +1,134 @@
 # Changelog
 
+## 0.10.0
+
+- **Minor bump, not a patch.** CONTRIBUTING reserves `0.X.0` for new features
+  or breaking changes, and reversing the startup contract is a breaking change:
+  a bot that started yesterday refuses to start today until its store is
+  migrated and attested and its configuration names a record. Three artifacts
+  carry the version — `package.json`, `.claude-plugin/plugin.json` and this
+  file's heading — and `src/plugin-manifest.test.ts` now asserts all three
+  agree. `/plugin update` compares the *manifest* version, so a release that
+  bumps only `package.json` never reaches an installed bot; the update simply
+  never fires.
+
+- Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#8a7dcfe` (yugo Release 2, #48).
+  A type-only check passes clean across this bump — `tsc --noEmit` is green and
+  the export surface is unchanged — while every bot's startup breaks. The
+  contract that moved is a runtime one.
+
+- **Reverses 0.9.0's "an absent store file is created rather than rejected
+  (SPEC §14 `INITIAL`)".** That sentence no longer describes shipped behaviour
+  and is superseded by SPEC-26 §8.2: a consumer must never create, refresh or
+  repair its own dedup store or its verification record, because
+  self-attestation is not attestation. There is no `--force`, no "accept
+  current values on mismatch", and no first-run auto-generation. Release 2
+  opens the store with `create: false`, so first boot against an unprovisioned
+  path now refuses instead of quietly starting a fresh, empty dedup history.
+
+  The two `src/server-startup.test.ts` tests that encoded the old contract were
+  rewritten to the new one rather than relaxed: an absent store is fatal and is
+  still absent afterwards, and a present-but-unattested store is fatal with a
+  message the operator can tell apart from the absent case.
+
+- **New env knob `YUGO_DEDUP_VERIFICATION_RECORD`, required and with no
+  default.** Parsed by `parseFleetBusStartupConfig` alongside the other startup
+  knobs. It is named for the package rather than the plugin because the package
+  reads that exact variable off `process.env` as `openVerifiedStore`'s default
+  argument; `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` has no
+  parameter to pass a record through, so the environment is the only channel.
+  `server.ts` validates the path and assigns the variable immediately before
+  constructing the store, so the value the library sees is the value the plugin
+  checked.
+
+  **Operators must set this per bot.** SPEC-26 §8.2 calls for "an explicit path
+  to an operator-provisioned file" and states that unset, with a file-backed
+  store configured, must refuse consumption — so unset is a fatal startup error
+  naming the variable, not a path derived on the operator's behalf. An earlier
+  draft of this release derived `<store>.verification.json`; that is gone,
+  because a derived path makes unset silently resolve instead of refusing, and
+  would adopt a stale record left beside the store by an earlier provisioning
+  purely by name coincidence. A blank value is rejected by name, like the store
+  path.
+
+- **`:memory:` stays exempt.** `openVerifiedStore` creates a fresh in-memory
+  schema for exactly that string and returns before consulting any record, so
+  the attestation contract binds file-backed stores only. The plugin's checks
+  are gated on the same exact sentinel, now a shared `IN_MEMORY_DEDUP_STORE`
+  constant: `existsSync(':memory:')` is false, and applying the existence checks
+  to it would have killed the package's own supported no-durability mode.
+
+- **The startup failure now names both paths and the fix.** `server.ts`
+  classifies the two conditions the library's own message cannot distinguish —
+  an absent store and an unattested one both surface as "missing verification
+  record" — and prints the store path, the expected record path and the
+  `yugo dedup provision` step. Those existence checks are **advisory
+  diagnostics, not verification**: they exist only to split the one condition
+  the library cannot, and everything they pass still goes to the library, which
+  owns the real verdict — canonical path, inode, device binding, schema
+  fingerprint, WAL, and whether the file is a database at all. The startup tests
+  for the permission and non-database cases now provision an attested store so
+  they get past the diagnostics and are judged by the library, rather than
+  passing on a missing-file message that has nothing to do with their subject.
+
+- **Operators must migrate and attest each live store before deploying this
+  version.** The live stores have six columns and Release 2 requires eight, so
+  the order is `yugo dedup migrate` and then
+  `yugo dedup provision --record-only` — provisioning alone refuses an
+  unmigrated store. `migrate()` takes an `O_EXCL` backup before it touches
+  anything, and that backup is the rollback artifact. See "Provisioning the
+  dedup store" in the README. Discarding the existing rows instead of migrating
+  is not free: dedup state is what closes the re-delivery window.
+
+- **Rollback rolls back the plugin, not just the dependency.** Re-pinning
+  `@artifice-ia/fleet-bus` to `feca116` on its own does not work: this
+  `server.ts` requires `YUGO_DEDUP_VERIFICATION_RECORD` and runs its own
+  record-existence preflight, and neither lives in the dependency. A
+  dependency-only rollback exits 1 on the unset variable — it fails in precisely
+  the situation it exists for. The target is **plugin 0.9.0 (`cd5a601`)**, which
+  pins `feca116` itself.
+
+  Verified by running that build against a restored six-column store with no
+  verification record and the variable unset: clean startup, exit 0, restored
+  row intact. The same configuration against this version exits 1. Accessors
+  stay stopped and prevented from restarting for the **whole** procedure, not
+  just the file swap.
+
+  Two costs remain unrecoverable: dedup rows written after cutover are lost with
+  the pre-migration snapshot, reopening the re-delivery window for exactly those
+  envelopes, and `feca116` returns to wall-clock leases, giving up the monotonic
+  fencing Release 2 exists to provide. **Rolling back after the bot has taken
+  traffic is an operator decision accepting both. Aborting before any envelope
+  has been processed is not the same decision and carries neither cost.**
+
+- **Re-attestation is a lifecycle obligation, now documented as one.** The
+  README carries SPEC-26 §8.5's dispositions rather than only the
+  reboot/`devno` case: a store **restored from backup or recreated**, and **any
+  change to the accessor inventory**, each require fresh inspection and
+  re-attestation. §8.5 is explicit that restoration is not reliably detectable —
+  an in-place restore can preserve the inode and every binding and therefore
+  pass every startup check — so **a successful startup is not evidence the
+  obligation was met**. The section links the authoritative spec.
+
+- **A blank `YUGO_DEDUP_VERIFICATION_RECORD` is rejected even in `:memory:`
+  mode**, because config parsing runs before the store mode is chosen. Its
+  *value* is never consulted for a `:memory:` store and leaving it unset there
+  is correct; a blank one is a typo either way, and is reported as a config
+  error rather than a storage error. Documented and tested rather than left as a
+  discrepancy between the README table and the code.
+
+- Runtime tests now build their `dedupStore` as `:memory:`. They exercise the
+  supervisor and injection wiring, never durability across processes, and
+  `openVerifiedStore` still accepts `:memory:` without a record — so the fixture
+  uses the library's own supported no-durability mode rather than minting an
+  attestation for itself.
+
+- **Host-qualification gate inherited from Release 2, unchanged by this
+  release.** `monotonic-clock.ts` refuses any host that is not Linux x86_64 with
+  glibc exactly 2.39 and Bun exactly 1.3.12, and `engines.bun` tightened from
+  `>=1.3.0` to `1.3.12`. A future Bun upgrade is a startup failure, not a
+  warning. Recorded here so it is not rediscovered during an incident.
+
 ## 0.9.0
 
 - Bump `@artifice-ia/fleet-bus` to `bazfer/yugo#feca116` (yugo #47), which
