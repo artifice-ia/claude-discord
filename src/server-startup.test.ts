@@ -32,6 +32,8 @@ const FATAL_STORAGE = 'fatal FleetBus storage error'
 /** The two operator conditions the library's own message cannot tell apart. */
 const ABSENT_STORE = 'dedup store does not exist'
 const UNATTESTED_STORE = 'dedup store is not attested'
+/** SPEC-26 §8.2: unset, with a file-backed store configured, must refuse. */
+const UNSET_RECORD_VAR = 'YUGO_DEDUP_VERIFICATION_RECORD is unset'
 
 /** Time to let a NON-fatal case run before killing it. Fatal cases exit well under this. */
 const RUN_MS = 6000
@@ -86,19 +88,27 @@ function deviceNumbers(dev: bigint): [bigint, bigint] {
 }
 
 /**
- * Stand in for `yugo dedup provision` — create an eight-column WAL store and
- * the verification record that binds it, returning the record path.
- *
- * Written here rather than imported from the package: the package's own
- * `src/dedup-test-fixtures.ts` is reachable on disk (bun's git install ignores
- * the `files` allowlist) but is absent from its `exports` map, so a deep import
- * does not resolve — and yugo #58 flags that a future packed tarball would drop
- * the file entirely.
- *
- * The schema fingerprint is read back off the live database rather than
- * transcribed, so this fixture cannot silently disagree with what it built. If
- * the package's `SUPPORTED_SCHEMA` moves, the library rejects this record and
- * these tests go red — which is the failure worth having.
+ * The eight-column fingerprint Release 2 supports, for records that must be
+ * written for a file no `PRAGMA table_info` can be read from (a non-database
+ * file). `provisionStore` reads its fingerprint off the live database instead.
+ */
+const SUPPORTED_COLUMNS = [
+  { name: 'envelope_id', declared_type: 'TEXT' },
+  { name: 'first_seen_ms', declared_type: 'INTEGER' },
+  { name: 'req_id', declared_type: 'TEXT' },
+  { name: 'state', declared_type: 'TEXT' },
+  { name: 'lease_owner', declared_type: 'TEXT' },
+  { name: 'lease_until_ms', declared_type: 'INTEGER' },
+  { name: 'lease_boot_id', declared_type: 'TEXT' },
+  { name: 'lease_until_mono_ms', declared_type: 'INTEGER' },
+]
+
+/**
+ * Write a verification record binding whatever file sits at `path`, returning
+ * the record path. Split out from `provisionStore` because two tests need a
+ * record for a file that is deliberately not a usable store — an attested but
+ * non-SQLite file has to get *past* the plugin's advisory existence checks so
+ * the library is what rejects it.
  *
  * `devno` binding, matching what the package's own fixtures use: the store
  * lives under a throwaway `tmpdir()` whose filesystem may have no
@@ -106,25 +116,13 @@ function deviceNumbers(dev: bigint): [bigint, bigint] {
  * UUID binding, which survives a reboot; a devno record carries the boot id it
  * was taken under and must be re-attested after every restart.
  */
-function provisionStore(storePath: string): string {
-  const db = new Database(storePath, { create: true })
-  db.exec('PRAGMA journal_mode=WAL')
-  db.exec(`CREATE TABLE envelope_dedup_v2 (
-    envelope_id TEXT PRIMARY KEY, first_seen_ms INTEGER NOT NULL,
-    req_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','completed')),
-    lease_owner TEXT NOT NULL, lease_until_ms INTEGER NOT NULL,
-    lease_boot_id TEXT NOT NULL DEFAULT '', lease_until_mono_ms INTEGER NOT NULL DEFAULT 0);
-    CREATE INDEX envelope_dedup_v2_first_seen ON envelope_dedup_v2(first_seen_ms)`)
-  const columns = (db.query('PRAGMA table_info(envelope_dedup_v2)').all() as { name: string; type: string }[])
-    .map(row => ({ name: row.name, declared_type: row.type }))
-  db.close()
-
-  const stat = statSync(storePath, { bigint: true })
+function writeVerificationRecord(path: string, columns: { name: string; declared_type: string }[]): string {
+  const stat = statSync(path, { bigint: true })
   const [major, minor] = deviceNumbers(stat.dev)
-  const recordPath = `${storePath}.verification.json`
+  const recordPath = `${path}.verification.json`
   writeFileSync(recordPath, JSON.stringify({
     record_version: 1,
-    canonical_path: realpathSync(storePath),
+    canonical_path: realpathSync(path),
     device: {
       binding: 'devno',
       major: Number(major),
@@ -140,15 +138,52 @@ function provisionStore(storePath: string): string {
       determined_by: 'test fixture only', uuid_resolution: 'test devno binding',
       inspected_at: '2026-09-24T19:00:00Z',
     },
-    participant_inventory: [{ process: 'bun test', user: 'test', path: storePath, method: 'test fixture' }],
+    participant_inventory: [{ process: 'bun test', user: 'test', path, method: 'test fixture' }],
     attested_by: 'server-startup.test.ts',
     attested_at: '2026-09-24T19:00:00Z',
   }))
   return recordPath
 }
 
-function busEnv(home: string, dedupPath: string): Record<string, string> {
-  return {
+/**
+ * Stand in for `yugo dedup provision` — create an eight-column WAL store and
+ * the verification record that binds it, returning the record path.
+ *
+ * Written here rather than imported from the package: the package's own
+ * `src/dedup-test-fixtures.ts` is reachable on disk (bun's git install ignores
+ * the `files` allowlist) but is absent from its `exports` map, so a deep import
+ * does not resolve — and yugo #58 flags that a future packed tarball would drop
+ * the file entirely.
+ *
+ * The schema fingerprint is read back off the live database rather than
+ * transcribed, so this fixture cannot silently disagree with what it built. If
+ * the package's `SUPPORTED_SCHEMA` moves, the library rejects this record and
+ * these tests go red — which is the failure worth having.
+ */
+function provisionStore(storePath: string): string {
+  const db = new Database(storePath, { create: true })
+  db.exec('PRAGMA journal_mode=WAL')
+  db.exec(`CREATE TABLE envelope_dedup_v2 (
+    envelope_id TEXT PRIMARY KEY, first_seen_ms INTEGER NOT NULL,
+    req_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','completed')),
+    lease_owner TEXT NOT NULL, lease_until_ms INTEGER NOT NULL,
+    lease_boot_id TEXT NOT NULL DEFAULT '', lease_until_mono_ms INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX envelope_dedup_v2_first_seen ON envelope_dedup_v2(first_seen_ms)`)
+  const columns = (db.query('PRAGMA table_info(envelope_dedup_v2)').all() as { name: string; type: string }[])
+    .map(row => ({ name: row.name, declared_type: row.type }))
+  db.close()
+  return writeVerificationRecord(storePath, columns)
+}
+
+/**
+ * `record` is required and may be `null`, which omits
+ * `YUGO_DEDUP_VERIFICATION_RECORD` entirely. There is no default here on
+ * purpose: SPEC-26 §8.2 gives the variable no default in the product either, so
+ * every call site has to say which record it configures — or that it configures
+ * none.
+ */
+function busEnv(home: string, dedupPath: string, record: string | null): Record<string, string> {
+  const env: Record<string, string> = {
     FLEET_BUS_DISABLED: '0',
     FLEET_BUS_USER: 'vec',
     FLEET_BUS_DEDUP_STORE_PATH: dedupPath,
@@ -159,6 +194,8 @@ function busEnv(home: string, dedupPath: string): Record<string, string> {
     // process down with it.
     FLEET_BUS_URL: 'nats://127.0.0.1:14222',
   }
+  if (record !== null) env.YUGO_DEDUP_VERIFICATION_RECORD = record
+  return env
 }
 
 describe('fleet-bus dedup store preflight (server.ts startup)', () => {
@@ -166,7 +203,7 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
     const home = makeHome()
     try {
       const dedup = join(home, 'no-such-dir', 'dedup.sqlite')
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const { status, stderr } = runServer(home, busEnv(home, dedup, `${dedup}.verification.json`))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(dedup)
       expect(status).toBe(1)
@@ -177,15 +214,27 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
   }, 20000)
 
   test('unwritable parent directory is fatal', () => {
+    // The store and its record both exist and are attested, so both advisory
+    // existence checks pass and the failure has to come from the library's own
+    // `accessSync(dir, W_OK)` precondition. A read-only parent is still fatal
+    // under Release 2: SQLite in WAL mode must create `-wal`/`-shm` beside the
+    // store, so a store it can only read is a store it cannot use.
     const home = makeHome()
     const locked = join(home, 'locked')
     spawnSync('mkdir', ['-p', locked])
     try {
-      chmodSync(locked, 0o500)
       const dedup = join(locked, 'dedup.sqlite')
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const record = provisionStore(dedup)
+      chmodSync(locked, 0o500)
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(dedup)
+      // Reached the library, which named the parent directory. Neither advisory
+      // check fired — this test is about permissions, not about absence.
+      expect(stderr).toContain('is not writable')
+      expect(stderr).toContain(locked)
+      expect(stderr).not.toContain(ABSENT_STORE)
+      expect(stderr).not.toContain(UNATTESTED_STORE)
       expect(status).toBe(1)
     } finally {
       chmodSync(locked, 0o700)
@@ -194,13 +243,22 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
   }, 20000)
 
   test('an existing file that is not a SQLite database is fatal', () => {
+    // Attested, so both advisory existence checks pass and the file reaches the
+    // library. A record binds a path, an inode and a device — it says nothing
+    // about the bytes — so "attested" and "is a database" are independent, and
+    // only the library can rule on the second.
     const home = makeHome()
     try {
       const dedup = join(home, '.claude', 'not-a-db.sqlite')
       writeFileSync(dedup, 'this is plain text, not a database\n')
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const record = writeVerificationRecord(dedup, SUPPORTED_COLUMNS)
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(dedup)
+      // The library's own verdict on the bytes, not either advisory check.
+      expect(stderr).toContain('file is not a database')
+      expect(stderr).not.toContain(ABSENT_STORE)
+      expect(stderr).not.toContain(UNATTESTED_STORE)
       expect(status).toBe(1)
     } finally {
       rmSync(home, { recursive: true, force: true })
@@ -218,7 +276,10 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
     try {
       const dedup = join(home, '.claude', 'fleet-bus-dedup-vec.sqlite')
       expect(existsSync(dedup)).toBe(false)
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      // The variable IS set — so this is about the store being absent, not
+      // about configuration being missing.
+      const record = `${dedup}.verification.json`
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(ABSENT_STORE)
       // Absence is reported as absence, not as the record being missing — the
@@ -248,7 +309,7 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
       rmSync(dedup, { force: true })
       expect(existsSync(dedup)).toBe(false)
       expect(existsSync(record)).toBe(true)
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(ABSENT_STORE)
       expect(stderr).not.toContain(UNATTESTED_STORE)
@@ -270,7 +331,7 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
       const record = provisionStore(dedup)
       rmSync(record, { force: true })
       expect(existsSync(dedup)).toBe(true)
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).toContain(FATAL_STORAGE)
       expect(stderr).toContain(UNATTESTED_STORE)
       // Distinguishable from the absent case, which is the whole point of
@@ -286,16 +347,73 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
     }
   }, 20000)
 
+  test('an unset YUGO_DEDUP_VERIFICATION_RECORD is fatal for a file-backed store (SPEC-26 §8.2)', () => {
+    // §8.2: "an explicit path to an operator-provisioned file ... Unset while a
+    // file-backed store is configured -> refuse consumption." The plugin
+    // deliberately derives no default, so unset refuses on its own terms rather
+    // than refusing later as a consequence of the file being absent. The store
+    // here is fully provisioned — only the configuration is missing, which is
+    // what isolates this from the absent and unattested cases.
+    const home = makeHome()
+    try {
+      const dedup = join(home, '.claude', 'fleet-bus-dedup-vec.sqlite')
+      const record = provisionStore(dedup)
+      expect(existsSync(dedup)).toBe(true)
+      expect(existsSync(record)).toBe(true)
+      const { status, stderr } = runServer(home, busEnv(home, dedup, null))
+      expect(stderr).toContain(FATAL_STORAGE)
+      expect(stderr).toContain(UNSET_RECORD_VAR)
+      // Not misreported as either filesystem condition: both files are there.
+      expect(stderr).not.toContain(ABSENT_STORE)
+      expect(stderr).not.toContain(UNATTESTED_STORE)
+      // Names the variable to set and the command that produces its target.
+      expect(stderr).toContain('YUGO_DEDUP_VERIFICATION_RECORD')
+      expect(stderr).toContain('yugo dedup provision')
+      expect(status).toBe(1)
+      // A record sitting beside the store must NOT be adopted by convention —
+      // that is the stale-record hazard the explicit variable exists to close.
+      expect(stderr).not.toContain('supervisor: connect failed')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  test("a ':memory:' store starts clean with no record and no record variable", () => {
+    // `openVerifiedStore` creates a fresh in-memory schema for exactly this
+    // string and returns before it consults any record, so SPEC-26 §8.2's
+    // file-backed requirement does not reach it. The advisory existence checks
+    // must not either: `existsSync(':memory:')` is false, and applying it here
+    // would kill the package's own supported no-durability mode.
+    const home = makeHome()
+    try {
+      const { status, stderr } = runServer(home, busEnv(home, ':memory:', null))
+      expect(stderr).not.toContain(FATAL_STORAGE)
+      expect(stderr).not.toContain(ABSENT_STORE)
+      expect(stderr).not.toContain(UNSET_RECORD_VAR)
+      expect(stderr).not.toContain('FleetBus unavailable')
+      // Got past the preflight and into the supervisor, where the dead port is
+      // a retry rather than a startup failure.
+      expect(stderr).toContain('supervisor: connect failed')
+      expect(stderr).toContain('shutting down')
+      expect(status).toBe(0)
+      // Nothing was created on disk under that name.
+      expect(existsSync(join(home, '.claude', ':memory:'))).toBe(false)
+      expect(existsSync(':memory:')).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 20000)
+
   test('a NATS connection failure stays non-fatal', () => {
     const home = makeHome()
     try {
       const dedup = join(home, '.claude', 'fleet-bus-dedup-vec.sqlite')
       // An attested store, so the run gets past the storage preflight and the
       // subject of this test is connectivity alone.
-      provisionStore(dedup)
+      const record = provisionStore(dedup)
       // FLEET_BUS_URL points at a dead port. Storage is a local precondition
       // and is fatal; connectivity is not — Discord never waits on the network.
-      const { status, stderr } = runServer(home, busEnv(home, dedup))
+      const { status, stderr } = runServer(home, busEnv(home, dedup, record))
       expect(stderr).not.toContain(FATAL_STORAGE)
       expect(stderr).not.toContain('fatal FleetBus')
       // The IIFE's catch did not fire either: the runtime was built and the
@@ -326,7 +444,9 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
       //      the file is proof the gate was respected rather than proof the
       //      path was broken.
       const broken = join(home, 'no-such-dir', 'dedup.sqlite')
-      const brokenRun = runServer(home, { ...busEnv(home, broken), FLEET_BUS_DISABLED: '1' })
+      // `null` omits YUGO_DEDUP_VERIFICATION_RECORD entirely: a Discord-only
+      // install must not newly require any of the Release 2 configuration.
+      const brokenRun = runServer(home, { ...busEnv(home, broken, null), FLEET_BUS_DISABLED: '1' })
       expect(brokenRun.stderr).not.toContain(FATAL_STORAGE)
       expect(brokenRun.stderr).not.toContain('FleetBus')
       expect(brokenRun.stderr).not.toContain('unusable')
@@ -335,7 +455,7 @@ describe('fleet-bus dedup store preflight (server.ts startup)', () => {
       expect(brokenRun.status).toBe(0)
 
       const usable = join(home, '.claude', 'fleet-bus-dedup-vec.sqlite')
-      const usableRun = runServer(home, { ...busEnv(home, usable), FLEET_BUS_DISABLED: '1' })
+      const usableRun = runServer(home, { ...busEnv(home, usable, null), FLEET_BUS_DISABLED: '1' })
       expect(existsSync(usable)).toBe(false)
       expect(usableRun.stderr).toContain('shutting down')
       expect(usableRun.status).toBe(0)

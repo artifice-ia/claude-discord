@@ -134,8 +134,8 @@ the existing Discord path running unchanged.
 | `FLEET_BUS_SUBSCRIBE_BROADCAST` | `0` | Subscribe to `fleet.broadcast.>` when set to `1` |
 | `FLEET_BUS_MANIFEST_PATH` | `~/vault/infra/fleet-manifest.yaml` | YAML source for the accepted `from_claim` bot allowlist |
 | `FLEET_BUS_AUDIT_LOG_PATH` | `~/.claude/fleet-bus-log.jsonl` | Owner-only inbound/drop audit log |
-| `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable — with the bus enabled, storage that cannot be opened exits the process at startup rather than falling back to Discord-only mode. A blank value is rejected at startup, not treated as unset. |
-| `YUGO_DEDUP_VERIFICATION_RECORD` | `<store>.verification.json` | Path to the operator-attested verification record that binds the dedup store (yugo Release 2, SPEC-26 §8.2). The library reads this variable itself, so the plugin resolves it and sets it before opening the store. **The plugin never creates it** — self-attestation is not attestation, so an absent store or an absent record exits the process at startup with a message naming both paths. A blank value is rejected at startup, not treated as unset. See [Provisioning the dedup store](#provisioning-the-dedup-store). |
+| `FLEET_BUS_DEDUP_STORE_PATH` | `~/.claude/fleet-bus-dedup-<bot>.sqlite` | Durable envelope-dedup SQLite store. The package requires an explicit path (yugo #47) — the plugin supplies this default, expanded from the process owner's home. The parent directory must already exist and be writable — with the bus enabled, storage that cannot be opened exits the process at startup rather than falling back to Discord-only mode. A blank value is rejected at startup, not treated as unset. Set it to `:memory:` for a bot that wants no durable dedup history — the package's own no-durability mode, which needs no verification record. |
+| `YUGO_DEDUP_VERIFICATION_RECORD` | **none — required when the store is file-backed** | Explicit path to the operator-attested verification record that binds the dedup store (yugo Release 2, SPEC-26 §8.2). The library reads this variable itself, so the plugin validates it and sets it before opening the store. **There is deliberately no default.** §8.2 requires an explicit path and says unset, with a file-backed store configured, must refuse consumption — and a `<store>.verification.json` convention would silently adopt a stale record left beside the store by an earlier provisioning. With the bus enabled and a file-backed store, unset is a fatal startup error naming this variable; so are an absent store and an absent record, each with its own message. A blank value is rejected rather than treated as unset. Not consulted when the store is `:memory:`. See [Provisioning the dedup store](#provisioning-the-dedup-store). |
 | `FLEET_BUS_HEARTBEAT_INTERVAL_MS` | `30000` | Heartbeat cadence override |
 | `FLEET_BUS_SUPERVISOR_SLEEP_MS` | `2000` | Supervisor reconnect backoff override |
 | `FLEET_BUS_RATE_WINDOW_MS` | `60000` | Rate-limit window (per-key fixed window) |
@@ -165,11 +165,17 @@ blips (SPEC §1.7). On session shutdown the supervisor is stopped cleanly.
 ### Provisioning the dedup store
 
 yugo Release 2 will not open a file-backed dedup store that no operator has
-attested (SPEC-26 §8.2). The plugin resolves the record path, sets
-`YUGO_DEDUP_VERIFICATION_RECORD` and opens the store on its fatal startup path —
-it never creates the store or the record, because self-attestation is not
+attested (SPEC-26 §8.2). The plugin opens the store on its fatal startup path
+and never creates the store or the record, because self-attestation is not
 attestation. With the bus enabled, an unprovisioned bot exits 1 before Discord
-login, naming the store, the record path it expected, and this procedure.
+login, naming the store, the record and this procedure.
+
+`YUGO_DEDUP_VERIFICATION_RECORD` **has no default and must be set per bot**
+whenever the store is file-backed. §8.2 requires an explicit path, and unset
+must refuse rather than resolve: a derived `<store>.verification.json` would
+silently adopt a stale record left beside the store by an earlier provisioning.
+A `:memory:` store is exempt — it is the package's own no-durability mode and
+consults no record.
 
 Provisioning is interactive and deliberately so: `yugo dedup provision` makes the
 operator type `STOPPED`, paste inspected storage evidence, type `ATTEST`, and
@@ -193,6 +199,10 @@ STORE=~/.claude/fleet-bus-dedup-<bot>.sqlite
 # 2. Attest the migrated store. --record-only means "do not create a store".
 "$YUGO" dedup provision --store "$STORE" --record "$STORE.verification.json" \
   --port typescript --record-only --attested-by "<operator>"
+
+# 3. Point the bot at the record. No default resolves this for you.
+#    (In the unit file / compose env, not just the provisioning shell.)
+export YUGO_DEDUP_VERIFICATION_RECORD="$STORE.verification.json"
 ```
 
 A brand-new store omits step 1 and drops `--record-only`, which creates the
@@ -204,9 +214,31 @@ be re-attested after every reboot; the UUID binding survives one. The tool picks
 UUID whenever `/dev/disk/by-uuid` resolves the store's device, so a `devno`
 result means that lookup failed and is worth investigating before accepting.
 
-**Rollback:** stop the bot, restore `$STORE.pre-r2.bak` over `$STORE` (removing
-the `-wal`/`-shm` sidecars), delete the verification record, and pin the plugin
-back to the pre-Release-2 `@artifice-ia/fleet-bus`.
+#### Rolling back
+
+Rollback is not a pin change alone. In order:
+
+1. **Stop every accessor of the store and prevent it from restarting** — the
+   same precondition as the migration, for the same reason: two processes
+   disagreeing about the schema is how a store gets corrupted. `migrate()`'s own
+   docstring makes this the caller's obligation, and no tool can prove it.
+2. Restore `$STORE.pre-r2.bak` over `$STORE`, and delete the `-wal`/`-shm`
+   sidecars — a stale WAL against a restored database replays changes the
+   restored file never made.
+3. Delete the verification record and unset `YUGO_DEDUP_VERIFICATION_RECORD`.
+4. Pin `@artifice-ia/fleet-bus` back to the pre-Release-2 commit (`feca116`) and
+   reinstall.
+
+Two costs, both real, neither recoverable afterwards:
+
+- **Dedup rows written after cutover are lost.** The backup is a snapshot from
+  before the migration, so every envelope claimed between cutover and rollback
+  disappears from the history. Those envelope IDs look unseen on redelivery, so
+  the re-delivery window reopens for exactly that set — the broker can hand them
+  back and they will be processed a second time.
+- **Monotonic lease fencing is given up.** `feca116` leases are wall-clock, so a
+  clock step can expire a live lease early or hold an expired one, which is the
+  failure Release 2 exists to close. Rolling back reinstates it.
 
 ### Fleet-bus MCP tools
 

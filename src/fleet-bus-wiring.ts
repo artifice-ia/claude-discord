@@ -600,25 +600,16 @@ export function defaultDedupStorePath(botName: string): string {
 }
 
 /**
- * The operator-attested verification record for a given store, when the
- * operator sets no override (yugo #58, SPEC-26 §8.2). Release 2 refuses any
- * file-backed store without one, so every bot needs this path resolved — a
- * default derived from the store keeps store and record as a single deployment
- * unit, and matches the `<store>.verification.json` convention yugo's own
- * fixtures use.
+ * The package's no-durability store sentinel. `openVerifiedStore` creates a
+ * fresh in-memory schema for exactly this string and returns before it consults
+ * any verification record, so a `:memory:` store is outside the attestation
+ * contract entirely (SPEC-26 §8.2 binds *file-backed* stores).
  *
- * A derived default is not a silent fallback: the record file itself is never
- * created by a consumer (SPEC-26 §8.2 forbids self-attestation), so an
- * unprovisioned bot still fails loudly at startup. What the default removes is
- * a second env var every unit file would otherwise have to repeat.
- *
- * Deliberately NOT the store path or its SQLite sidecars — `yugo dedup
- * provision` refuses a record that would overwrite `<store>`, `<store>-wal` or
- * `<store>-shm`, so the default has to avoid all three.
+ * Exported so server.ts and its tests compare against one constant rather than
+ * three copies of a magic string, and matched exactly — the package itself uses
+ * `path !== ':memory:'`, so no other spelling is exempt.
  */
-export function defaultDedupVerificationRecordPath(storePath: string): string {
-  return `${storePath}.verification.json`
-}
+export const IN_MEMORY_DEDUP_STORE = ':memory:'
 
 /**
  * Strict non-blank path env parse. Undefined means "operator left it unset —
@@ -642,9 +633,10 @@ export interface FleetBusStartupConfig {
   /** `undefined` means "use `defaultDedupStorePath(botName)`" — server.ts owns that fallback. */
   dedupStorePath: string | undefined
   /**
-   * `undefined` means "use `defaultDedupVerificationRecordPath(storePath)`" —
-   * server.ts owns that fallback, because the default is derived from the
-   * already-resolved store path rather than from the environment.
+   * `undefined` means the operator did not set it. There is no default:
+   * SPEC-26 §8.2 requires an explicit path and says that unset, with a
+   * file-backed store configured, must refuse consumption. server.ts owns that
+   * refusal, because only it knows whether the resolved store is file-backed.
    */
   dedupVerificationRecordPath: string | undefined
 }

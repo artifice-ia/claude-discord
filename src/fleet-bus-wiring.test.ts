@@ -27,7 +27,8 @@ import {
   DEFAULT_CLAUDE_BOTS,
   DEFAULT_CODEX_BOTS,
   defaultDedupStorePath,
-  defaultDedupVerificationRecordPath,
+  DurableEnvelopeDedupStore,
+  IN_MEMORY_DEDUP_STORE,
   parseFleetBusMode,
   parseFleetBusStartupConfig,
   parseFleetPeerRuntimes,
@@ -606,7 +607,9 @@ describe('parseFleetBusStartupConfig', () => {
       .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
     expect(() => parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '   ' }))
       .toThrow('YUGO_DEDUP_VERIFICATION_RECORD')
-    // Unset means "derive it from the store path"; a real path passes through.
+    // Unset stays undefined — there is no default (SPEC-26 §8.2); server.ts
+    // turns that into a refusal for a file-backed store. A real path passes
+    // through, so the guard is not "satisfied" by rejecting everything.
     expect(parseFleetBusStartupConfig({}).dedupVerificationRecordPath).toBeUndefined()
     expect(parseFleetBusStartupConfig({ YUGO_DEDUP_VERIFICATION_RECORD: '/srv/vec.record.json' })
       .dedupVerificationRecordPath).toBe('/srv/vec.record.json')
@@ -654,21 +657,19 @@ describe('defaultDedupStorePath', () => {
   })
 })
 
-describe('defaultDedupVerificationRecordPath', () => {
-  test('sits beside the store it attests', () => {
-    expect(defaultDedupVerificationRecordPath('/srv/dedup-vec.sqlite'))
-      .toBe('/srv/dedup-vec.sqlite.verification.json')
-    expect(defaultDedupVerificationRecordPath(defaultDedupStorePath('vec')))
-      .toBe(`${homedir()}/.claude/fleet-bus-dedup-vec.sqlite.verification.json`)
+describe('IN_MEMORY_DEDUP_STORE', () => {
+  test('is the exact sentinel the package matches on', () => {
+    // The package tests `path !== ':memory:'` in both
+    // `DurableEnvelopeDedupStore` and `openVerifiedStore`. Any other spelling
+    // is a file-backed path and stays inside the attestation contract, so this
+    // constant must not drift into something friendlier.
+    expect(IN_MEMORY_DEDUP_STORE).toBe(':memory:')
+    expect(new DurableEnvelopeDedupStore(IN_MEMORY_DEDUP_STORE)).toBeDefined()
   })
 
-  test('never collides with the store or its SQLite sidecars', () => {
-    // `yugo dedup provision` refuses a record path equal to the store,
-    // `<store>-wal` or `<store>-shm`, so a default that produced any of those
-    // would be unprovisionable — the operator could never create the file the
-    // plugin then demands.
-    const store = '/srv/dedup-vec.sqlite'
-    const record = defaultDedupVerificationRecordPath(store)
-    expect([store, `${store}-wal`, `${store}-shm`]).not.toContain(record)
+  test('is never what defaultDedupStorePath produces', () => {
+    // A bot whose default store silently resolved to the in-memory sentinel
+    // would lose its dedup history across every restart without a word.
+    expect(defaultDedupStorePath('vec')).not.toBe(IN_MEMORY_DEDUP_STORE)
   })
 })

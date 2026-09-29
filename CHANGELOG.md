@@ -21,29 +21,45 @@
   still absent afterwards, and a present-but-unattested store is fatal with a
   message the operator can tell apart from the absent case.
 
-- **New env knob `YUGO_DEDUP_VERIFICATION_RECORD`**, parsed by
-  `parseFleetBusStartupConfig` alongside the other startup knobs and defaulting
-  to `<store>.verification.json`. It is named for the package rather than the
-  plugin because the package reads that exact variable off `process.env` as
-  `openVerifiedStore`'s default argument;
-  `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` has no parameter to
-  pass a record through, so the environment is the only channel. `server.ts`
-  resolves the path and assigns the variable immediately before constructing
-  the store, so the value the library sees is the value the plugin resolved.
+- **New env knob `YUGO_DEDUP_VERIFICATION_RECORD`, required and with no
+  default.** Parsed by `parseFleetBusStartupConfig` alongside the other startup
+  knobs. It is named for the package rather than the plugin because the package
+  reads that exact variable off `process.env` as `openVerifiedStore`'s default
+  argument; `DurableEnvelopeDedupStore(path, ttlMs?, leaseMsValue?)` has no
+  parameter to pass a record through, so the environment is the only channel.
+  `server.ts` validates the path and assigns the variable immediately before
+  constructing the store, so the value the library sees is the value the plugin
+  checked.
 
-  A derived default is not a silent fallback: nothing in the plugin can produce
-  the record, so an unprovisioned bot still fails at startup. What the default
-  removes is a second path every unit file would otherwise have to keep in sync
-  with `FLEET_BUS_DEDUP_STORE_PATH`. A blank value is rejected by name, like the
-  store path.
+  **Operators must set this per bot.** SPEC-26 §8.2 calls for "an explicit path
+  to an operator-provisioned file" and states that unset, with a file-backed
+  store configured, must refuse consumption — so unset is a fatal startup error
+  naming the variable, not a path derived on the operator's behalf. An earlier
+  draft of this release derived `<store>.verification.json`; that is gone,
+  because a derived path makes unset silently resolve instead of refusing, and
+  would adopt a stale record left beside the store by an earlier provisioning
+  purely by name coincidence. A blank value is rejected by name, like the store
+  path.
+
+- **`:memory:` stays exempt.** `openVerifiedStore` creates a fresh in-memory
+  schema for exactly that string and returns before consulting any record, so
+  the attestation contract binds file-backed stores only. The plugin's checks
+  are gated on the same exact sentinel, now a shared `IN_MEMORY_DEDUP_STORE`
+  constant: `existsSync(':memory:')` is false, and applying the existence checks
+  to it would have killed the package's own supported no-durability mode.
 
 - **The startup failure now names both paths and the fix.** `server.ts`
   classifies the two conditions the library's own message cannot distinguish —
   an absent store and an unattested one both surface as "missing verification
   record" — and prints the store path, the expected record path and the
-  `yugo dedup provision` step. Everything past file existence (canonical path,
-  inode, device binding, schema fingerprint, WAL) stays the library's to judge;
-  the plugin does not re-implement it.
+  `yugo dedup provision` step. Those existence checks are **advisory
+  diagnostics, not verification**: they exist only to split the one condition
+  the library cannot, and everything they pass still goes to the library, which
+  owns the real verdict — canonical path, inode, device binding, schema
+  fingerprint, WAL, and whether the file is a database at all. The startup tests
+  for the permission and non-database cases now provision an attested store so
+  they get past the diagnostics and are judged by the library, rather than
+  passing on a missing-file message that has nothing to do with their subject.
 
 - **Operators must migrate and attest each live store before deploying this
   version.** The live stores have six columns and Release 2 requires eight, so
