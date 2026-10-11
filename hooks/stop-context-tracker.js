@@ -154,6 +154,18 @@ function checkDiscordReply(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type !== 'user') continue;
+
+    // SKIP TURN COMPANIONS. Reading an image appends a synthetic user entry whose body
+    // is a plain string like "[Image: original 1536x2048 ...]". It is type 'user', so the
+    // scan below treated it as the latest human turn, found no Discord marker and gave up.
+    // THE GUARD AGAINST FAILING TO REPLY AFTER AN IMAGE WAS THEREFORE BLINDED BY IMAGES --
+    // the one case it exists for was the one case it could not see.
+    //
+    // turnCompanion is the safe discriminator. In a 38k-entry transcript 60 entries carry
+    // it and none is a Discord message; isMeta is NOT safe, 1513 carry that including the
+    // real ones.
+    if (e.turnCompanion) continue;
+
     const content = e.message?.content;
     if (!content) continue;
 

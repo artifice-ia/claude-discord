@@ -87,5 +87,26 @@ else
   ok "DISCORD_REPLY_GUARD=off disables the block"
 fi
 
+# ---- THE CASE THE GUARD EXISTED FOR AND COULD NOT SEE ----
+# Reading an image appends a synthetic user entry: type 'user', plain string body,
+# turnCompanion true. The backwards scan stopped on it, found no Discord marker and
+# concluded the turn was not from Discord -- so the guard against failing to reply after
+# an IMAGE was blinded by IMAGES. Reproduced from a real transcript, 2026-10-11.
+rm -f /tmp/hooktest-reply-guard-blocked.json
+: > "$WORK/projects/p/s.jsonl"
+{
+  printf '{"type":"user","message":{"content":"%s"}}\n' "$DISCORD_MSG"
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}],"usage":{"input_tokens":10}}}\n'
+  printf '{"type":"user","message":{"content":[{"type":"tool_result"}]}}\n'
+  printf '{"type":"user","isMeta":true,"turnCompanion":true,"message":{"content":"[Image: original 1536x2048, displayed at 1500x2000.]"}}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"analysis written, never sent"}],"usage":{"input_tokens":10}}}\n'
+} >> "$WORK/projects/p/s.jsonl"
+OUT=$(run)
+if printf '%s' "$OUT" | grep -q '"decision":"block"'; then
+  ok "it blocks after an IMAGE read, despite the turnCompanion entry in between"
+else
+  bad "an image turnCompanion entry still blinds the guard -- the original bug"
+fi
+
 printf '\n  %d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
