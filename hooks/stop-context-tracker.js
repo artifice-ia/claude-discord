@@ -91,6 +91,10 @@ const CTX_TXT = `/tmp/${BOT_NAME}-ctx.txt`;
 const MEM_FLAG = `/tmp/${BOT_NAME}-memory-save.flag`;
 const DISCORD_SENT_FLAG = `/tmp/${BOT_NAME}-memory-discord-sent.flag`;
 const MISSED_REPLY_FLAG = `/tmp/${BOT_NAME}-missed-discord-reply.flag`;
+// Which message the last block was for, so an unsendable reply cannot trap the turn.
+const REPLY_GUARD_MARKER = `/tmp/${BOT_NAME}-reply-guard-blocked.json`;
+const REPLY_GUARD_DISABLED = process.env.DISCORD_REPLY_GUARD === 'off';
+let lastUnansweredKey = '';
 
 function findRecentSession() {
   const projectsDir = path.join(claudeDir, 'projects');
@@ -150,6 +154,18 @@ function checkDiscordReply(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type !== 'user') continue;
+
+    // SKIP TURN COMPANIONS. Reading an image appends a synthetic user entry whose body
+    // is a plain string like "[Image: original 1536x2048 ...]". It is type 'user', so the
+    // scan below treated it as the latest human turn, found no Discord marker and gave up.
+    // THE GUARD AGAINST FAILING TO REPLY AFTER AN IMAGE WAS THEREFORE BLINDED BY IMAGES --
+    // the one case it exists for was the one case it could not see.
+    //
+    // turnCompanion is the safe discriminator. In a 38k-entry transcript 60 entries carry
+    // it and none is a Discord message; isMeta is NOT safe, 1513 carry that including the
+    // real ones.
+    if (e.turnCompanion) continue;
+
     const content = e.message?.content;
     if (!content) continue;
 
@@ -168,6 +184,7 @@ function checkDiscordReply(entries) {
   }
 
   if (lastDiscordIdx === -1) return 'not_discord';
+  lastUnansweredKey = String(lastDiscordIdx);
 
   for (let i = lastDiscordIdx + 1; i < entries.length; i++) {
     const e = entries[i];
@@ -258,8 +275,38 @@ process.stdin.on('end', async () => {
   const replyStatus = checkDiscordReply(entries);
   if (replyStatus === 'discord_no_reply') {
     try { fs.writeFileSync(MISSED_REPLY_FLAG, JSON.stringify({ ts: Date.now() })); } catch {}
+
+    // REFUSE TO END THE TURN. This check has been correct since it was written and did
+    // nothing, because the only thing it did was write a flag no code reads. A verdict
+    // with no consequence is indistinguishable from no check at all.
+    //
+    // Writing the answer as assistant text does not send it: the human sees silence, and
+    // the model does not notice, because the turn feels finished once the content exists.
+    //
+    // Self-limiting: once the reply is sent, the next Stop sees it and passes.
+    if (!REPLY_GUARD_DISABLED) {
+      const key = `${sessionFile}:${lastUnansweredKey}`;
+      let prior = null;
+      try { prior = JSON.parse(fs.readFileSync(REPLY_GUARD_MARKER, 'utf8')).key; } catch {}
+
+      // Block ONCE per unanswered message. If sending is genuinely broken, refusing
+      // forever hides the real failure behind a loop.
+      if (prior !== key) {
+        try { fs.writeFileSync(REPLY_GUARD_MARKER, JSON.stringify({ key, ts: Date.now() })); } catch {}
+        process.stdout.write(JSON.stringify({
+          decision: 'block',
+          reason:
+            'A Discord message is unanswered: you have not called the reply tool this turn. ' +
+            'Writing the reply as ordinary response text does NOT send it -- the sender sees ' +
+            'silence. Call the Discord reply tool with the chat_id and your text now, then finish.'
+        }));
+        process.exit(0);
+        return;
+      }
+    }
   } else if (replyStatus === 'discord_replied') {
     try { fs.unlinkSync(MISSED_REPLY_FLAG); } catch {}
+    try { fs.unlinkSync(REPLY_GUARD_MARKER); } catch {}
   }
 
   process.exit(0);
