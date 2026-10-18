@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.3
+
+- Make the Discord reply guard own the first Stop; forward only after its one-block retry is exhausted.
+- Share transcript turn identity between Stop hooks and scope the guard to the payload transcript.
+
 ## 0.10.2
 
 - No runtime change. The 0.10.1 gate tests spawned the hooks with
