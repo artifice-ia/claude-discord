@@ -1,0 +1,1 @@
+Synthetic transcript fixtures, not captures of a real blocked Stop. Real retry shape remains unverified pending Deet’s sanitized runtime capture. Each case loads one JSONL file through loadFixture; swapping a captured case requires changing only its fixture filename. The image case ports the prior shell regression shape.

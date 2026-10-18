@@ -9,11 +9,9 @@ let dir: string
 let name: string
 let preload: string
 let session: string
-const trigger = { type: 'user', message: { content: '<channel source="plugin:artifice-discord:artifice-discord" chat_id="123">hello</channel>' } }
-const closing = { type: 'assistant', message: { usage: { input_tokens: 100 }, content: [{ type: 'text', text: 'answer' }] } }
-const reply = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__plugin_artifice-discord_artifice-discord__reply', input: { text: 'answer', chat_id: '123' } }] } }
-function writeSession(file: string, entries: unknown[]) {
-  writeFileSync(file, entries.map(e => JSON.stringify(e)).join('\n'))
+// Synthetic only: replace the filename per case when a real runtime capture arrives.
+function loadFixture(fixture: string, file = session) {
+  writeFileSync(file, readFileSync(join(import.meta.dir, 'fixtures', 'reply-guard', fixture + '.jsonl')))
 }
 function run(hook: string, payload: unknown = { transcript_path: session }, disabled = false) {
   const result = spawnSync('node', ['--require', preload, join(hooks, hook)], {
@@ -31,7 +29,7 @@ beforeEach(() => {
   name = dir.split('/').pop()!
   mkdirSync(join(dir, 'projects'))
   session = join(dir, 'projects', 'a.jsonl')
-  writeSession(session, [trigger, closing])
+  loadFixture('unanswered')
   writeFileSync(join(dir, 'persona.md'), `---\nname: "${name}"\ndiscord_channel: "123"\n---\n`)
   writeFileSync(join(dir, 'discord-token'), 'fixture-only')
   preload = join(dir, 'preload.cjs')
@@ -39,6 +37,11 @@ beforeEach(() => {
 const fs = require('fs')
 const { EventEmitter } = require('events')
 require('https').request = (options, cb) => {
+  if (process.env.DISCORD_REPLY_GUARD !== 'off') {
+    // Assert persistence ordering, not merely eventual state after the process exits.
+    const state = JSON.parse(fs.readFileSync('/tmp/${name}-reply-guard-forwarded.json', 'utf8'))
+    if (!state.key) throw new Error('POST before durable fallback claim')
+  }
   console.error('HTTPS ' + options.path)
   const res = new EventEmitter()
   res.statusCode = 200
@@ -57,25 +60,56 @@ for (const method of ['readFileSync', 'writeFileSync']) {
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
-  for (const suffix of ['ctx.json', 'ctx.txt', 'missed-discord-reply.flag', 'reply-guard-blocked.json']) {
+  for (const suffix of ['ctx.json', 'ctx.txt', 'missed-discord-reply.flag', 'reply-guard-blocked.json', 'reply-guard-forwarded.json', 'reply-guard-forwarded.json.lock']) {
     rmSync(`/tmp/${name}-${suffix}`, { force: true })
   }
 })
 const forward = 'discord-stop-forward.js'
 const guard = 'stop-context-tracker.js'
 
-test('first pass stands down, guard blocks once, second pass forwards exactly once', () => {
-  expect(run(forward).requests).toEqual([])
+for (const order of ['guard-first', 'forward-first']) {
+  test(`first Stop never posts in ${order} completion order`, () => {
+    const payload = { transcript_path: session, stop_hook_active: false }
+    if (order === 'forward-first') expect(run(forward, payload).requests).toEqual([])
+    const blocked = run(guard, payload)
+    expect(JSON.parse(blocked.stdout).decision).toBe('block')
+    expect(blocked.requests).toEqual([])
+    if (order === 'guard-first') expect(run(forward, payload).requests).toEqual([])
+    // Missing, false, and truthy non-boolean values are not an actual retry.
+    for (const active of [undefined, false, 'true', 1]) {
+      expect(run(forward, { transcript_path: session, stop_hook_active: active }).requests).toEqual([])
+    }
+  })
+}
+
+test('repeated second-pass Stops post exactly once and never re-block', () => {
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   const marker = JSON.parse(readFileSync(`/tmp/${name}-reply-guard-blocked.json`, 'utf8'))
   expect(marker.key).toBe(`${session}:0`)
-  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual(['/api/v10/channels/123/messages'].map(p => 'HTTPS ' + p))
-  expect(run(guard, { transcript_path: session, stop_hook_active: true }).stdout).toBe('')
+  loadFixture('retry-unanswered')
+  const payload = { transcript_path: session, stop_hook_active: true }
+  const requests = []
+  for (let i = 0; i < 3; i++) {
+    requests.push(...run(forward, payload).requests)
+    expect(run(guard, payload).stdout).toBe('')
+  }
+  expect(requests).toEqual(['HTTPS /api/v10/channels/123/messages'])
+  expect(JSON.parse(readFileSync(`/tmp/${name}-reply-guard-forwarded.json`, 'utf8')).key).toBe(marker.key)
+})
+
+test('retry signal without the matching marker cannot send', () => {
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+test('non-Discord terminal turn never blocks (ported shell case)', () => {
+  loadFixture('terminal')
+  expect(run(guard).stdout).toBe('')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
 })
 
 test('real reply on re-prompt suppresses fallback, even with trailing text', () => {
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
-  writeSession(session, [trigger, closing, reply, closing])
+  loadFixture('retry-replied')
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
   expect(run(guard).stdout).toBe('')
 })
@@ -86,9 +120,9 @@ test('disabled guard preserves first-pass forwarding', () => {
 })
 
 test('payload A wins over newer unanswered B; fallback cannot block', () => {
-  writeSession(session, [trigger, reply, closing])
+  loadFixture('replied')
   const b = join(dir, 'projects', 'b.jsonl')
-  writeSession(b, [trigger, closing])
+  loadFixture('unanswered', b)
   utimesSync(session, 1, 1)
   utimesSync(b, 2, 2)
   expect(run(guard).stdout).toBe('')
@@ -98,13 +132,13 @@ test('payload A wins over newer unanswered B; fallback cannot block', () => {
 
 test('an unrelated marker cannot authorize forwarding a different turn', () => {
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
-  writeSession(session, [trigger, closing, trigger, closing])
-  expect(run(forward).requests).toEqual([])
+  loadFixture('new-turn')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
 })
 
 test('image turn companion preserves shared key and second-pass fallback', () => {
-  writeSession(session, [trigger, { type: 'user', turnCompanion: true, message: { content: '[Image: original]' } }, closing])
+  loadFixture('image')
   expect(run(forward).requests).toEqual([])
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toHaveLength(1)
@@ -112,4 +146,14 @@ test('image turn companion preserves shared key and second-pass fallback', () =>
 
 test('missing payload transcript does not substitute another session', () => {
   expect(run(guard, { transcript_path: join(dir, 'missing.jsonl') }).stdout).toBe('')
+})
+
+test('a later turn can claim its own fallback without inheriting earlier delivery', () => {
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  const payload = { transcript_path: session, stop_hook_active: true }
+  expect(run(forward, payload).requests).toHaveLength(1)
+  loadFixture('new-turn')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, payload).requests).toHaveLength(1)
+  expect(run(forward, payload).requests).toEqual([])
 })

@@ -11,7 +11,7 @@
 // Race note: Stop fires before the final text entry is flushed to the transcript.
 // We wait 300ms before reading so the write completes first.
 
-const { readFileSync } = require('fs')
+const { readFileSync, writeFileSync, openSync, closeSync, unlinkSync } = require('fs')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
@@ -149,6 +149,9 @@ process.stdin.on('end', async () => {
   let payload = {}
   try { payload = JSON.parse(raw) } catch { process.exit(0) }
 
+  // Stop handlers run in parallel: a marker alone cannot prove a retry.
+  if (process.env.DISCORD_REPLY_GUARD !== 'off' && payload.stop_hook_active !== true) process.exit(0)
+
   // Re-prompted Stops are the fallback's opportunity to send. We never block.
 
   const transcriptPath = payload.transcript_path
@@ -208,6 +211,7 @@ process.stdin.on('end', async () => {
 
   let persona = {}
   try { persona = readFrontmatter(readFileSync(personaPath, 'utf8')) } catch {}
+  let fallbackKey = null
   if (process.env.DISCORD_REPLY_GUARD !== 'off') {
     const { status, key } = discordReplyState(transcriptPath, entries)
     if (status !== 'discord_no_reply') process.exit(0)
@@ -217,6 +221,7 @@ process.stdin.on('end', async () => {
     } catch {}
     // First pass belongs to the guard; only its spent block authorizes fallback.
     if (prior !== key) process.exit(0)
+    fallbackKey = key
   }
   const chatMatch = triggerContent.match(/chat_id="(\d+)"/)
   // Always forward to the persona's configured channel, not the trigger
@@ -238,6 +243,30 @@ process.stdin.on('end', async () => {
     rest = rest.slice(cut).replace(/^\n+/, '')
   }
   if (rest) chunks.push(rest)
+
+  if (fallbackKey) {
+    const stateFile = `/tmp/${persona.name || 'bot'}-reply-guard-forwarded.json`
+    const lockFile = stateFile + '.lock'
+    let lock
+    try { lock = openSync(lockFile, 'wx') } catch { process.exit(0) }
+    let claimed = false
+    try {
+      let prior = null
+      try { prior = JSON.parse(readFileSync(stateFile, 'utf8')).key } catch {}
+      if (prior !== fallbackKey) {
+        // Claim BEFORE network I/O: a crash mid-send must not duplicate delivery.
+        // The exclusive lock also serializes overlapping retry Stop processes.
+        writeFileSync(stateFile, JSON.stringify({ key: fallbackKey, ts: Date.now() }))
+        claimed = true
+      }
+    } catch {
+      // Cannot persist the claim: fail closed instead of risking duplicates.
+    } finally {
+      closeSync(lock)
+      unlinkSync(lockFile)
+    }
+    if (!claimed) process.exit(0)
+  }
 
   function post(idx) {
     if (idx >= chunks.length) { process.exit(0); return }

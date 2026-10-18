@@ -1,0 +1,2 @@
+{"type": "user", "message": {"content": [{"type": "text", "text": "<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hello</channel>"}]}}
+{"type": "assistant", "message": {"usage": {"input_tokens": 100}, "content": [{"type": "text", "text": "answer"}]}}
