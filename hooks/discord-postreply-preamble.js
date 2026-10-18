@@ -64,6 +64,12 @@ function hasReplyCall(content) {
 let raw = ''
 process.stdin.on('data', c => { raw += c })
 process.stdin.on('end', async () => {
+  // Deactivated 2026-10-18 at the operator's request. This hook posted the
+  // turn's main-loop text to the channel as a second, blockquoted message,
+  // which duplicated reasoning the user had already read in the reply itself.
+  // The code stays in place: set DISCORD_POSTREPLY_PREAMBLE=1 to re-enable it.
+  if (process.env.DISCORD_POSTREPLY_PREAMBLE !== '1') process.exit(0)
+
   let payload = {}
   try { payload = JSON.parse(raw) } catch { process.exit(0) }
 

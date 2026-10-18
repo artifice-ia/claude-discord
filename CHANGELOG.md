@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.1
+
+- **`discord-postreply-preamble` is deactivated by default.** The hook posted
+  the turn's main-loop assistant text to the channel as a second, blockquoted
+  message after the reply tool fired. In practice that duplicated reasoning the
+  user had already read in the reply itself, so the channel received the same
+  content twice.
+
+  The hook keeps its registration in `hooks/hooks.json` and its code is
+  unchanged below the gate. A single guard at the top of the stdin handler
+  returns before the hook reads `persona.md`, its per-session state file or the
+  transcript, so no Discord request is reachable while the gate holds. Set
+  `DISCORD_POSTREPLY_PREAMBLE=1` in the bot's environment to restore the old
+  behaviour.
+
+  The safety net for turns that end without calling the reply tool lives in
+  `discord-stop-forward.js` and is untouched: closing text still reaches the
+  channel when the agent forgets to reply.
+
 ## 0.10.0
 
 - **Minor bump, not a patch.** CONTRIBUTING reserves `0.X.0` for new features
