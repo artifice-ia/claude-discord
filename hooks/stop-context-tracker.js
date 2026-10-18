@@ -94,7 +94,7 @@ const MISSED_REPLY_FLAG = `/tmp/${BOT_NAME}-missed-discord-reply.flag`;
 // Which message the last block was for, so an unsendable reply cannot trap the turn.
 const REPLY_GUARD_MARKER = `/tmp/${BOT_NAME}-reply-guard-blocked.json`;
 const REPLY_GUARD_DISABLED = process.env.DISCORD_REPLY_GUARD === 'off';
-let lastUnansweredKey = '';
+const { discordReplyState } = require('./discord-reply-state');
 
 function findRecentSession() {
   const projectsDir = path.join(claudeDir, 'projects');
@@ -135,6 +135,7 @@ function parseSession(filePath) {
     if (!line.trim()) continue;
     let entry;
     try { entry = JSON.parse(line); } catch { continue; }
+    if (!entry) continue;
     entries.push(entry);
     if (entry.type !== 'assistant' || !entry.message?.usage) continue;
     const u = entry.message.usage;
@@ -145,59 +146,6 @@ function parseSession(filePath) {
   }
 
   return { lastInputTokens, lastModel, totalOutputTokens, turns, entries };
-}
-
-// Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
-function checkDiscordReply(entries) {
-  let lastDiscordIdx = -1;
-
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e.type !== 'user') continue;
-
-    // SKIP TURN COMPANIONS. Reading an image appends a synthetic user entry whose body
-    // is a plain string like "[Image: original 1536x2048 ...]". It is type 'user', so the
-    // scan below treated it as the latest human turn, found no Discord marker and gave up.
-    // THE GUARD AGAINST FAILING TO REPLY AFTER AN IMAGE WAS THEREFORE BLINDED BY IMAGES --
-    // the one case it exists for was the one case it could not see.
-    //
-    // turnCompanion is the safe discriminator. In a 38k-entry transcript 60 entries carry
-    // it and none is a Discord message; isMeta is NOT safe, 1513 carry that including the
-    // real ones.
-    if (e.turnCompanion) continue;
-
-    const content = e.message?.content;
-    if (!content) continue;
-
-    if (Array.isArray(content) && content.every(c => c.type === 'tool_result')) continue;
-
-    const textParts = Array.isArray(content)
-      ? content.filter(c => c.type === 'text').map(c => c.text).join('')
-      : (typeof content === 'string' ? content : '');
-
-    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
-      lastDiscordIdx = i;
-      break;
-    } else {
-      break;
-    }
-  }
-
-  if (lastDiscordIdx === -1) return 'not_discord';
-  lastUnansweredKey = String(lastDiscordIdx);
-
-  for (let i = lastDiscordIdx + 1; i < entries.length; i++) {
-    const e = entries[i];
-    if (e.type !== 'assistant') continue;
-    const content = e.message?.content;
-    if (!Array.isArray(content)) continue;
-    const hasReply = content.some(
-      c => c.type === 'tool_use' && c.name && c.name.includes('discord') && c.name.includes('reply')
-    );
-    if (hasReply) return 'discord_replied';
-  }
-
-  return 'discord_no_reply';
 }
 
 // Returns HTTP status code, or null on network error/timeout.
@@ -229,11 +177,15 @@ let input = '';
 process.stdin.resume();
 process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', async () => {
-  const sessionFile = findRecentSession();
+  let payload = {};
+  try { payload = JSON.parse(input); } catch {}
+  const transcriptPath = payload?.transcript_path;
+  // Legacy fallback is for context telemetry only; it must never authorize a block.
+  const sessionFile = transcriptPath || findRecentSession();
   if (!sessionFile) { process.exit(0); return; }
 
   const parsed = parseSession(sessionFile);
-  if (!parsed || parsed.turns === 0) { process.exit(0); return; }
+  if (!parsed) { process.exit(0); return; }
 
   const { lastInputTokens, lastModel, totalOutputTokens, turns, entries } = parsed;
   const contextLimit = windowForModel(lastModel);
@@ -272,7 +224,7 @@ process.stdin.on('end', async () => {
   }
 
   // Discord reply check
-  const replyStatus = checkDiscordReply(entries);
+  const { status: replyStatus, key } = discordReplyState(sessionFile, entries);
   if (replyStatus === 'discord_no_reply') {
     try { fs.writeFileSync(MISSED_REPLY_FLAG, JSON.stringify({ ts: Date.now() })); } catch {}
 
@@ -284,8 +236,7 @@ process.stdin.on('end', async () => {
     // the model does not notice, because the turn feels finished once the content exists.
     //
     // Self-limiting: once the reply is sent, the next Stop sees it and passes.
-    if (!REPLY_GUARD_DISABLED) {
-      const key = `${sessionFile}:${lastUnansweredKey}`;
+    if (!REPLY_GUARD_DISABLED && transcriptPath) {
       let prior = null;
       try { prior = JSON.parse(fs.readFileSync(REPLY_GUARD_MARKER, 'utf8')).key; } catch {}
 

@@ -320,13 +320,13 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
     expectCleanExit(preamble)
   })
 
-  test('closing text with no reply call still reaches the channel', () => {
+  test('closing text with no reply call reaches the channel with guard disabled', () => {
     const run = runHook(STOP_HOOK, {
       transcript_path: transcript('stop-leaked', [
         userEntry(discordTrigger),
         assistantText('closing text the agent forgot to send'),
       ]),
-    })
+    }, { DISCORD_REPLY_GUARD: 'off' })
     expect(run.requests).toEqual([`POST /api/v10/channels/${PERSONA_CHANNEL}/messages`])
     expectCleanExit(run)
   })

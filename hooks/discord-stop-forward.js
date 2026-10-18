@@ -3,7 +3,7 @@
 // Safety net for Discord-bridged bots: when a turn was triggered by a Discord
 // message but ended WITHOUT calling the reply tool, the agent's closing text
 // only reached the terminal — invisible to the user. This forwards that text
-// to the originating Discord channel so no response silently vanishes.
+// to the configured Discord channel after the reply guard has spent its retry.
 //
 // Fires on Stop. Does nothing (exit 0) when: the turn already called reply, the
 // trigger wasn't a Discord message, or there's no closing text. Never blocks.
@@ -15,6 +15,7 @@ const { readFileSync } = require('fs')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
+const { discordReplyState } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -148,8 +149,7 @@ process.stdin.on('end', async () => {
   let payload = {}
   try { payload = JSON.parse(raw) } catch { process.exit(0) }
 
-  // We never block, so a re-prompt loop can't form — but bail anyway if flagged.
-  if (payload.stop_hook_active) process.exit(0)
+  // Re-prompted Stops are the fallback's opportunity to send. We never block.
 
   const transcriptPath = payload.transcript_path
   if (!transcriptPath) process.exit(0)
@@ -172,7 +172,8 @@ process.stdin.on('end', async () => {
   //   - turn ended on reply → covered, do nothing
   // Earlier text (pre-reply preamble, mid-turn narration) is intentionally
   // ignored — only the closing statement matters. This catches trailing text
-  // emitted AFTER a reply, which is the common slip.
+  // emitted AFTER a reply when the guard is disabled. With the guard enabled,
+  // any reply in this turn covers it and suppresses the fallback below.
   let leakedText = ''
   let decided = false
   let triggerContent = null
@@ -189,6 +190,7 @@ process.stdin.on('end', async () => {
         // thinking / tool_use(Bash) entries carry no text — keep walking
       }
     } else if (e.type === 'user') {
+      if (process.env.DISCORD_REPLY_GUARD !== 'off' && e.turnCompanion) continue
       if (isToolResult(content)) continue
       triggerContent = textOf(content)
       break
@@ -206,6 +208,16 @@ process.stdin.on('end', async () => {
 
   let persona = {}
   try { persona = readFrontmatter(readFileSync(personaPath, 'utf8')) } catch {}
+  if (process.env.DISCORD_REPLY_GUARD !== 'off') {
+    const { status, key } = discordReplyState(transcriptPath, entries)
+    if (status !== 'discord_no_reply') process.exit(0)
+    let prior = null
+    try {
+      prior = JSON.parse(readFileSync(`/tmp/${persona.name || 'bot'}-reply-guard-blocked.json`, 'utf8')).key
+    } catch {}
+    // First pass belongs to the guard; only its spent block authorizes fallback.
+    if (prior !== key) process.exit(0)
+  }
   const chatMatch = triggerContent.match(/chat_id="(\d+)"/)
   // Always forward to the persona's configured channel, not the trigger
   // channel — trigger may be a fan-out channel.
