@@ -5,23 +5,23 @@
  * Three things can regress silently:
  *  - A noop-false tick must POST a new message. An edit instead would skip
  *    Fernando's phone notification.
- *  - A noop-true tick must EDIT, not post. A second POST would send a
- *    notification for every quiet tick.
- *  - A missing `loops_channel` must produce no network activity at all — the
- *    hook is a guest in every bot; bots without a loops_channel opt out by
- *    simply omitting the key.
+ *  - A noop-true tick must EDIT a prior quiet message, but must NOT overwrite
+ *    a message that reported a real event. P1's test is the critical one: it
+ *    was the assertion missing from the initial suite.
+ *  - A missing `loops_channel` must produce no network activity at all.
  *
  * Each silence assertion is paired with a clean-exit check and a positive
  * control, so the test cannot pass on a broken harness or a silent crash.
  *
- * The hook is a plain CJS script. Tests run it as a subprocess under Node
- * (as hooks.json does) via a preload that intercepts https.request and fs
- * writes, recording them to stderr without letting them escape to the network.
+ * The hook is CJS with `require.main === module` guarding the stdin handler,
+ * so `ownerTime` can be required and tested as a pure function (P3).
+ * The subprocess tests cover all process-level behaviour (P1, P2, P4).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -38,8 +38,9 @@ function loopId(sessionId: string, prompt: string): string {
 }
 
 // Preload: intercepts https.request (records method+path to stderr, drives
-// response callback with a synthetic {"id":"fixture-msg-id"} body for POST
-// and {} for PATCH), and intercepts fs.writeFileSync (records WRITE to stderr).
+// response callback with a synthetic body), captures request body on req.end(),
+// and intercepts fs.writeFileSync (records WRITE to stderr).
+// Set _DISCORD_STATUS in env to control the synthetic response status code.
 const PRELOAD_SOURCE = `
 const https = require('https')
 const fs = require('fs')
@@ -48,15 +49,20 @@ const { EventEmitter } = require('events')
 https.request = function (options, callback) {
   const method = options.method || 'GET'
   const path = options.path || ''
+  const statusCode = Number(process.env._DISCORD_STATUS || 200)
   console.error('HTTPS ' + method + ' ' + path)
   const res = new EventEmitter()
-  const body = method === 'POST' ? '{"id":"fixture-msg-id"}' : '{}'
-  if (callback) setImmediate(() => {
-    callback(res)
-    res.emit('data', body)
-    res.emit('end')
-  })
-  return { on() { return this }, write() { return this }, end() { return this } }
+  Object.assign(res, { statusCode })
+  const responseBody = statusCode >= 400 ? '{"code":50001}' : (method === 'POST' ? '{"id":"fixture-msg-id"}' : '{}')
+  const bodyChunks = []
+  return {
+    on() { return this },
+    write(data) { bodyChunks.push(String(data)); return this },
+    end() {
+      console.error('BODY ' + bodyChunks.join(''))
+      if (callback) setImmediate(() => { callback(res); res.emit('data', responseBody); res.emit('end') })
+    }
+  }
 }
 
 const _writeFileSync = fs.writeFileSync
@@ -80,7 +86,9 @@ function resolveNode(): string {
 
 interface Run {
   requests: string[]
+  bodies: string[]
   writes: string[]
+  logs: string[]
   status: number | null
   signal: string | null
 }
@@ -100,7 +108,9 @@ function runHook(payload: unknown, env: Record<string, string> = {}): Run {
   const lines = (result.stderr ?? '').split('\n').filter(Boolean)
   return {
     requests: lines.filter(l => l.startsWith('HTTPS ')).map(l => l.slice(6)),
+    bodies: lines.filter(l => l.startsWith('BODY ')).map(l => l.slice(5)),
     writes: lines.filter(l => l.startsWith('WRITE ')).map(l => l.slice(6)),
+    logs: lines.filter(l => l.startsWith('loop-tick:')),
     status: result.status,
     signal: result.signal ?? null,
   }
@@ -111,9 +121,9 @@ function expectCleanExit(run: Run): void {
   expect(run.status).toBe(0)
 }
 
-function schedulePayload(overrides: Record<string, unknown> = {}) {
+function schedulePayload(overrides: Record<string, unknown> = {}, sessionId = SESSION_ID) {
   return {
-    session_id: SESSION_ID,
+    session_id: sessionId,
     tool_name: 'ScheduleWakeup',
     tool_input: {
       delaySeconds: 1200,
@@ -142,6 +152,30 @@ afterAll(() => {
   rmSync(fixtures, { recursive: true, force: true })
 })
 
+// ─── ownerTime (pure function, no subprocess) ─────────────────────────────
+
+describe('ownerTime — DST boundary (pure function)', () => {
+  const cjsRequire = createRequire(import.meta.url)
+  const { ownerTime } = cjsRequire(HOOK) as { ownerTime: (d: Date) => string }
+
+  test('CDT (October) and CST (November) render an hour apart at the same UTC time', () => {
+    // America/Chicago uses CDT (UTC-5) through Oct 31, then CST (UTC-6) from Nov 1.
+    // At 2026-10-15 04:00 UTC: CDT → 23:00. At 2026-11-15 04:00 UTC: CST → 22:00.
+    // If the offset were hard-coded, both would render the same wrong time.
+    const oct = new Date('2026-10-15T04:00:00Z')
+    const nov = new Date('2026-11-15T04:00:00Z')
+    expect(ownerTime(oct)).not.toEqual(ownerTime(nov))
+  })
+
+  test('formats as HH:MM in 24-hour time', () => {
+    // 2026-10-15 04:00 UTC → CDT 23:00
+    const d = new Date('2026-10-15T04:00:00Z')
+    expect(ownerTime(d)).toMatch(/^\d{2}:\d{2}$/)
+  })
+})
+
+// ─── ScheduleWakeup — subprocess tests ────────────────────────────────────
+
 describe('discord-loop-tick — ScheduleWakeup', () => {
   test('noop-false tick posts a new message', () => {
     const run = runHook(schedulePayload({ noop: false }))
@@ -156,36 +190,72 @@ describe('discord-loop-tick — ScheduleWakeup', () => {
     expectCleanExit(run)
   })
 
-  test('noop-true tick edits the previous message and does not post', () => {
-    const id = loopId(SESSION_ID, LOOP_PROMPT)
-    const stateFile = join(fixtures, `artifice-loop-tick-${id}.json`)
-    writeFileSync(stateFile, JSON.stringify({ msg_id: 'prior-msg-id', channel: LOOPS_CHANNEL, streak: 1 }))
+  // P1: the critical assertion that was missing from the initial suite.
+  // A noop tick must NOT overwrite a message that reported a real event.
+  test('noop-true tick after a real event POSTs a new message instead of overwriting', () => {
+    const sess = 'p1-session'
+    const id = loopId(sess, LOOP_PROMPT)
+    try { rmSync(join(fixtures, `artifice-loop-tick-${id}.json`)) } catch {}
 
-    const run = runHook(schedulePayload({ noop: true }))
-    expect(run.requests).toEqual([`PATCH /api/v10/channels/${LOOPS_CHANNEL}/messages/prior-msg-id`])
+    const p = (noop: boolean) => schedulePayload({ noop, reason: 'p1 test' }, sess)
+
+    const r1 = runHook(p(false))
+    expect(r1.requests).toEqual([`POST /api/v10/channels/${LOOPS_CHANNEL}/messages`])
+    expectCleanExit(r1)
+
+    // After a real event, state.is_quiet === false.
+    // The quiet tick must not PATCH that message — it must POST a new one.
+    const r2 = runHook(p(true))
+    expect(r2.requests).toEqual([`POST /api/v10/channels/${LOOPS_CHANNEL}/messages`])
+    expectCleanExit(r2)
+  })
+
+  // P2: first quiet tick after a real event must show 'quiet x1', not 'quiet x2'.
+  test('first quiet after a real event shows quiet x1, not quiet x2', () => {
+    const sess = 'p2-session'
+    const id = loopId(sess, LOOP_PROMPT)
+    try { rmSync(join(fixtures, `artifice-loop-tick-${id}.json`)) } catch {}
+
+    runHook(schedulePayload({ noop: false }, sess))
+    const r = runHook(schedulePayload({ noop: true }, sess))
+
+    const body = r.bodies[0] ? JSON.parse(r.bodies[0]) as { content?: string } : null
+    expect(body?.content).toContain('quiet x1')
+    expect(body?.content).not.toContain('quiet x2')
+    expectCleanExit(r)
+  })
+
+  test('noop-true tick edits the previous quiet message and does not post', () => {
+    const sess = 'edit-session'
+    const id = loopId(sess, LOOP_PROMPT)
+    // Pre-write a state that represents a prior quiet tick
+    writeFileSync(
+      join(fixtures, `artifice-loop-tick-${id}.json`),
+      JSON.stringify({ msg_id: 'prior-quiet-msg', channel: LOOPS_CHANNEL, streak: 1, is_quiet: true }),
+    )
+
+    const run = runHook(schedulePayload({ noop: true }, sess))
+    expect(run.requests).toEqual([`PATCH /api/v10/channels/${LOOPS_CHANNEL}/messages/prior-quiet-msg`])
     expectCleanExit(run)
   })
 
   test('three consecutive quiet ticks produce one message and a streak of 3', () => {
-    const id = loopId('streak-session', LOOP_PROMPT)
-    const stateFile = join(fixtures, `artifice-loop-tick-${id}.json`)
-    try { rmSync(stateFile) } catch {}
+    const sess = 'streak-session'
+    const id = loopId(sess, LOOP_PROMPT)
+    try { rmSync(join(fixtures, `artifice-loop-tick-${id}.json`)) } catch {}
 
-    const p = (noop: boolean) => ({
-      session_id: 'streak-session',
-      tool_name: 'ScheduleWakeup',
-      tool_input: { delaySeconds: 600, reason: 'quiet hold', prompt: LOOP_PROMPT, noop },
-    })
+    const p = (noop: boolean) => schedulePayload({ noop, delaySeconds: 600, reason: 'quiet hold' }, sess)
 
-    const r1 = runHook(p(true))
-    const r2 = runHook(p(true))
-    const r3 = runHook(p(true))
+    const r1 = runHook(p(true))  // no prior state → POST
+    const r2 = runHook(p(true))  // prior is_quiet=true → PATCH
+    const r3 = runHook(p(true))  // prior is_quiet=true → PATCH
 
-    // First tick: no prior state → POST
     expect(r1.requests).toEqual([`POST /api/v10/channels/${LOOPS_CHANNEL}/messages`])
-    // Second and third: EDIT existing message
     expect(r2.requests).toEqual([`PATCH /api/v10/channels/${LOOPS_CHANNEL}/messages/fixture-msg-id`])
     expect(r3.requests).toEqual([`PATCH /api/v10/channels/${LOOPS_CHANNEL}/messages/fixture-msg-id`])
+
+    const body3 = r3.bodies[0] ? JSON.parse(r3.bodies[0]) as { content?: string } : null
+    expect(body3?.content).toContain('quiet x3')
 
     expectCleanExit(r1)
     expectCleanExit(r2)
@@ -193,21 +263,27 @@ describe('discord-loop-tick — ScheduleWakeup', () => {
   })
 
   test('stop=true produces no request', () => {
-    const run = runHook({ ...schedulePayload(), tool_input: { stop: true } })
+    const run = runHook({ tool_name: 'ScheduleWakeup', tool_input: { stop: true } })
     expect(run.requests).toEqual([])
     expectCleanExit(run)
   })
 
   test('missing loops_channel produces no request', () => {
-    // Write persona without loops_channel as a positive control check
-    const noLoops = join(fixtures, 'persona-no-loops.md')
-    writeFileSync(noLoops, `---\nname: "test-bot"\ndiscord_channel: "999"\n---\nFixture persona.\n`)
-    const run = runHook(schedulePayload({ noop: false }), { CLAUDE_CONFIG_DIR: fixtures + '-noloops' })
-    // CLAUDE_CONFIG_DIR points to a non-existent dir so persona.md read fails → silent exit
+    // CLAUDE_CONFIG_DIR points to a non-existent dir — persona.md read fails → silent exit
+    const run = runHook(schedulePayload({ noop: false }), { CLAUDE_CONFIG_DIR: fixtures + '-absent' })
     expect(run.requests).toEqual([])
     expectCleanExit(run)
   })
+
+  // P4: a non-2xx Discord response must be logged to stderr.
+  test('non-2xx Discord response logs the status code', () => {
+    const run = runHook(schedulePayload({ noop: false }), { _DISCORD_STATUS: '403' })
+    expect(run.logs.some(l => l.includes('403'))).toBe(true)
+    expectCleanExit(run)
+  })
 })
+
+// ─── Non-scheduling tools ─────────────────────────────────────────────────
 
 describe('discord-loop-tick — non-scheduling tools', () => {
   test('Bash call produces no request', () => {
@@ -222,6 +298,8 @@ describe('discord-loop-tick — non-scheduling tools', () => {
     expectCleanExit(run)
   })
 })
+
+// ─── CronCreate ───────────────────────────────────────────────────────────
 
 describe('discord-loop-tick — CronCreate', () => {
   test('CronCreate posts a single announcement', () => {
