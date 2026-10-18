@@ -1,3 +1,18 @@
+// A blocking Stop hook's reason is appended by Claude Code as a `user` entry, so a
+// backward scan for the human turn finds IT and not the human. Captured on 2.1.303:
+//
+//   {"type":"user","message":{"role":"user","content":"Stop hook feedback:\n<reason>"},
+//    "isMeta":true,"userType":"external","entrypoint":"sdk-cli"}
+//
+// No turnCompanion, so the companion skip above does not cover it. The match below is
+// deliberately narrow: isMeta alone is NOT a discriminator, as the comment in the scan
+// records, so all three conditions are required.
+function isStopHookFeedback(entry) {
+  if (!entry || entry.isMeta !== true) return false;
+  const content = entry.message?.content;
+  return typeof content === 'string' && content.startsWith('Stop hook feedback:');
+}
+
 // Shared turn identity and reply verdict for both Stop hooks.
 // Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
 function discordReplyState(sessionFile, entries) {
@@ -17,6 +32,11 @@ function discordReplyState(sessionFile, entries) {
     // it and none is a Discord message; isMeta is NOT safe, 1513 carry that including the
     // real ones.
     if (e.turnCompanion) continue;
+
+    // SKIP THE RETRY INJECTION. Without this the second Stop of a blocked turn judges the
+    // hook's own feedback entry as the newest human turn, returns not_discord, and the
+    // fallback that this whole handoff exists to preserve never fires.
+    if (isStopHookFeedback(e)) continue;
 
     const content = e.message?.content;
     if (!content) continue;
@@ -52,4 +72,4 @@ function discordReplyState(sessionFile, entries) {
   return { status: 'discord_no_reply', key };
 }
 
-module.exports = { discordReplyState };
+module.exports = { discordReplyState, isStopHookFeedback };

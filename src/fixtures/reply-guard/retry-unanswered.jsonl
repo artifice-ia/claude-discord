@@ -1,2 +1,4 @@
 {"type": "user", "message": {"content": [{"type": "text", "text": "<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hello</channel>"}]}}
 {"type": "assistant", "message": {"usage": {"input_tokens": 100}, "content": [{"type": "text", "text": "answer"}]}}
+{"type": "user", "message": {"role": "user", "content": "Stop hook feedback:\nA Discord message is unanswered: you have not called the reply tool this turn."}, "isMeta": true, "userType": "external", "entrypoint": "sdk-cli"}
+{"type": "assistant", "message": {"usage": {"input_tokens": 100}, "content": [{"type": "text", "text": "still only prose, no reply tool"}]}}

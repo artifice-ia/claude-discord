@@ -11,11 +11,12 @@
 // Race note: Stop fires before the final text entry is flushed to the transcript.
 // We wait 300ms before reading so the write completes first.
 
-const { readFileSync, writeFileSync, openSync, closeSync, unlinkSync } = require('fs')
+const { readFileSync, openSync, closeSync, writeSync } = require('fs')
+const { createHash } = require('crypto')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
-const { discordReplyState } = require('./discord-reply-state')
+const { discordReplyState, isStopHookFeedback } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -134,6 +135,13 @@ function stripPromptScaffolding(text) {
   return cleaned.replace(/\n{3,}/g, '\n\n').trim()
 }
 
+// One claim file per turn, under the bot's own name. The key holds a transcript path, so it
+// is hashed rather than embedded: a path contains separators and has no length bound.
+function claimFileFor(key) {
+  const bot = (persona && persona.name) || 'bot'
+  return `/tmp/${bot}-reply-guard-forwarded-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+}
+
 function isToolResult(content) {
   return Array.isArray(content) && content.length > 0 &&
     content.every(b => b && b.type === 'tool_result')
@@ -143,6 +151,7 @@ function hasReplyCall(content) {
   return Array.isArray(content) && content.some(b => b && b.type === 'tool_use' && b.name === REPLY_TOOL)
 }
 
+let persona = {}
 let raw = ''
 process.stdin.on('data', c => { raw += c })
 process.stdin.on('end', async () => {
@@ -194,6 +203,9 @@ process.stdin.on('end', async () => {
       }
     } else if (e.type === 'user') {
       if (process.env.DISCORD_REPLY_GUARD !== 'off' && e.turnCompanion) continue
+      // Same reason as the shared scan: on a retry Stop this entry is the hook's own
+      // feedback, and treating it as the trigger loses the Discord marker.
+      if (process.env.DISCORD_REPLY_GUARD !== 'off' && isStopHookFeedback(e)) continue
       if (isToolResult(content)) continue
       triggerContent = textOf(content)
       break
@@ -209,7 +221,7 @@ process.stdin.on('end', async () => {
   leakedText = stripPromptScaffolding(leakedText)
   if (!leakedText) process.exit(0)
 
-  let persona = {}
+  persona = {}
   try { persona = readFrontmatter(readFileSync(personaPath, 'utf8')) } catch {}
   let fallbackKey = null
   if (process.env.DISCORD_REPLY_GUARD !== 'off') {
@@ -245,25 +257,22 @@ process.stdin.on('end', async () => {
   if (rest) chunks.push(rest)
 
   if (fallbackKey) {
-    const stateFile = `/tmp/${persona.name || 'bot'}-reply-guard-forwarded.json`
-    const lockFile = stateFile + '.lock'
-    let lock
-    try { lock = openSync(lockFile, 'wx') } catch { process.exit(0) }
+    // Claim the turn BEFORE any network I/O: a crash mid-send must not duplicate delivery.
+    //
+    // The claim is an exclusive create of a per-turn file, not a lock file guarding a
+    // shared one. A lock would make a process killed while holding it fail every later
+    // Stop closed FOREVER, silently, which is worse than the duplicate it prevents:
+    // `openSync(lock, 'wx')` cannot tell a live holder from a corpse. An exclusive create
+    // keyed by the turn carries no such state — whoever creates it owns the send, and a
+    // leftover file means that turn was already claimed, which is exactly true.
     let claimed = false
     try {
-      let prior = null
-      try { prior = JSON.parse(readFileSync(stateFile, 'utf8')).key } catch {}
-      if (prior !== fallbackKey) {
-        // Claim BEFORE network I/O: a crash mid-send must not duplicate delivery.
-        // The exclusive lock also serializes overlapping retry Stop processes.
-        writeFileSync(stateFile, JSON.stringify({ key: fallbackKey, ts: Date.now() }))
-        claimed = true
-      }
+      const fd = openSync(claimFileFor(fallbackKey), 'wx')
+      // The exclusive create IS the claim; the body is for operators reading /tmp.
+      try { writeSync(fd, JSON.stringify({ key: fallbackKey, ts: Date.now() })) } finally { closeSync(fd) }
+      claimed = true
     } catch {
-      // Cannot persist the claim: fail closed instead of risking duplicates.
-    } finally {
-      closeSync(lock)
-      unlinkSync(lockFile)
+      claimed = false
     }
     if (!claimed) process.exit(0)
   }

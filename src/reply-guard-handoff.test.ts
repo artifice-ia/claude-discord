@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -9,7 +9,6 @@ let dir: string
 let name: string
 let preload: string
 let session: string
-// Synthetic only: replace the filename per case when a real runtime capture arrives.
 function loadFixture(fixture: string, file = session) {
   writeFileSync(file, readFileSync(join(import.meta.dir, 'fixtures', 'reply-guard', fixture + '.jsonl')))
 }
@@ -39,8 +38,12 @@ const { EventEmitter } = require('events')
 require('https').request = (options, cb) => {
   if (process.env.DISCORD_REPLY_GUARD !== 'off') {
     // Assert persistence ordering, not merely eventual state after the process exits.
-    const state = JSON.parse(fs.readFileSync('/tmp/${name}-reply-guard-forwarded.json', 'utf8'))
-    if (!state.key) throw new Error('POST before durable fallback claim')
+    // Assert the claim is DURABLE before the POST, not merely present after the process
+    // exits. Claims are one file per turn, so a run that legitimately delivers two turns
+    // leaves two: the count belongs to the test body, the ordering belongs here.
+    const claims = fs.readdirSync('/tmp').filter(f => f.startsWith('${name}-reply-guard-forwarded-'))
+    const keyed = claims.filter(f => { try { return !!JSON.parse(fs.readFileSync('/tmp/' + f, 'utf8')).key } catch { return false } })
+    if (keyed.length === 0) throw new Error('POST before durable fallback claim')
   }
   console.error('HTTPS ' + options.path)
   const res = new EventEmitter()
@@ -60,8 +63,11 @@ for (const method of ['readFileSync', 'writeFileSync']) {
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
-  for (const suffix of ['ctx.json', 'ctx.txt', 'missed-discord-reply.flag', 'reply-guard-blocked.json', 'reply-guard-forwarded.json', 'reply-guard-forwarded.json.lock']) {
+  for (const suffix of ['ctx.json', 'ctx.txt', 'missed-discord-reply.flag', 'reply-guard-blocked.json']) {
     rmSync(`/tmp/${name}-${suffix}`, { force: true })
+  }
+  for (const file of readdirSync('/tmp')) {
+    if (file.startsWith(`${name}-reply-guard-forwarded-`)) rmSync(join('/tmp', file), { force: true })
   }
 })
 const forward = 'discord-stop-forward.js'
@@ -94,7 +100,11 @@ test('repeated second-pass Stops post exactly once and never re-block', () => {
     expect(run(guard, payload).stdout).toBe('')
   }
   expect(requests).toEqual(['HTTPS /api/v10/channels/123/messages'])
-  expect(JSON.parse(readFileSync(`/tmp/${name}-reply-guard-forwarded.json`, 'utf8')).key).toBe(marker.key)
+  // One claim file per turn, named by a hash of the key, so find it by its body.
+  const claims = readdirSync('/tmp')
+    .filter(f => f.startsWith(`${name}-reply-guard-forwarded-`))
+    .map(f => JSON.parse(readFileSync(join('/tmp', f), 'utf8')).key)
+  expect(claims).toEqual([marker.key])
 })
 
 test('retry signal without the matching marker cannot send', () => {
@@ -156,4 +166,55 @@ test('a later turn can claim its own fallback without inheriting earlier deliver
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, payload).requests).toHaveLength(1)
   expect(run(forward, payload).requests).toEqual([])
+})
+
+// THE RETRY ENTRY IS THE WHOLE HANDOFF. Claude Code appends a blocking hook's reason as a
+// `user` entry carrying isMeta and a "Stop hook feedback:" body, with no turnCompanion
+// field. Both backward scans used to stop there, judge the turn as "not Discord", and
+// exit — so the fallback these two hooks hand off to could never fire, while every test
+// built on a synthetic retry transcript passed. The fixtures below carry the captured
+// entry; see src/fixtures/reply-guard/README.md for its provenance.
+test('a retry Stop carrying the real injected entry forwards exactly once', () => {
+  const first = { transcript_path: session, stop_hook_active: false }
+  expect(JSON.parse(run(guard, first).stdout).decision).toBe('block')
+  const blockedKey = JSON.parse(readFileSync(`/tmp/${name}-reply-guard-blocked.json`, 'utf8')).key
+
+  loadFixture('retry-unanswered')
+  const retry = { transcript_path: session, stop_hook_active: true }
+  expect(run(forward, retry).requests).toEqual(['HTTPS /api/v10/channels/123/messages'])
+
+  // The key must survive the appended entries, or the marker comparison silently fails
+  // open on one side and closed on the other.
+  run(guard, retry)
+  expect(JSON.parse(readFileSync(`/tmp/${name}-reply-guard-blocked.json`, 'utf8')).key).toBe(blockedKey)
+
+  // Repeated retry Stops are one delivery, not one per Stop.
+  expect(run(forward, retry).requests).toEqual([])
+  expect(run(forward, retry).requests).toEqual([])
+})
+
+test('a retry Stop whose turn did get a reply forwards nothing', () => {
+  const first = { transcript_path: session, stop_hook_active: false }
+  run(guard, first)
+  loadFixture('retry-replied')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+// A leftover claim from a process that died mid-send must not disable the fallback for
+// every LATER turn. The claim is per-turn, so a stale one can only ever suppress its own.
+test('a claim left by an earlier turn does not suppress a different turn', () => {
+  const first = { transcript_path: session, stop_hook_active: false }
+  run(guard, first)
+  loadFixture('retry-unanswered')
+  const retry = { transcript_path: session, stop_hook_active: true }
+  expect(run(forward, retry).requests).toEqual(['HTTPS /api/v10/channels/123/messages'])
+
+  // A second turn: new transcript path, so a new key, with its own guard block.
+  const second = join(dir, 'projects', 'b.jsonl')
+  loadFixture('unanswered', second)
+  const secondFirst = { transcript_path: second, stop_hook_active: false }
+  expect(JSON.parse(run(guard, secondFirst).stdout).decision).toBe('block')
+  loadFixture('retry-unanswered', second)
+  expect(run(forward, { transcript_path: second, stop_hook_active: true }).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
