@@ -7,8 +7,9 @@
   blockquoted message. It did so on two paths: after any NON-reply tool call,
   addressed to the persona channel, which is where the duplicate reasoning
   operators saw came from; and after a reply call whose own `text` was empty.
-  A reply carrying text has always short-circuited the hook, so a normal
-  answer was never duplicated.
+  A reply carrying text has always short-circuited the hook, so that reply
+  call itself never produced a second POST — read narrowly: an earlier
+  non-reply preamble in the same turn could already have sent the same prose.
 
   The hook keeps its registration in `hooks/hooks.json` and its code is
   unchanged below the gate. A single guard at the top of the stdin handler

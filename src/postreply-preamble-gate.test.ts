@@ -48,6 +48,7 @@ const TRIGGER_CHANNEL = '111222333444555666'
 
 let fixtures: string
 let preload: string
+let node: string
 
 /**
  * Records every HTTPS attempt and every file read as a line on stderr, then
@@ -110,10 +111,26 @@ interface Run {
   writes: string[]
   requests: string[]
   status: number | null
+  signal: string | null
+}
+
+/**
+ * `hooks.json` invokes these hooks as `node <hook>`, so the tests must too.
+ * Reaching for `process.execPath` would run them under Bun — the runtime they
+ * never see in production — and a silence assertion would then be proving
+ * something about the wrong interpreter. Missing Node fails the suite rather
+ * than falling back, because the fallback is exactly the gap worth closing.
+ */
+function resolveNode(): string {
+  const probe = spawnSync('node', ['--version'], { encoding: 'utf8' })
+  if (probe.status !== 0) {
+    throw new Error('these tests run the hooks under Node, as hooks.json does, and `node` is not on PATH')
+  }
+  return 'node'
 }
 
 function runHook(hook: string, payload: unknown, env: Record<string, string> = {}): Run {
-  const result = spawnSync(process.execPath, ['--require', preload, hook], {
+  const result = spawnSync(node, ['--require', preload, hook], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
     env: {
@@ -130,7 +147,18 @@ function runHook(hook: string, payload: unknown, env: Record<string, string> = {
     writes: lines.filter(l => l.startsWith('WRITE ')).map(l => l.slice(6)),
     requests: lines.filter(l => l.startsWith('HTTPS ')).map(l => l.slice(6)),
     status: result.status,
+    signal: result.signal ?? null,
   }
+}
+
+/**
+ * Every assertion below is paired with this. A hook that crashed, or was
+ * killed, also makes no HTTPS request — so without it, `requests` being empty
+ * would be satisfied by the harness failing rather than by the gate holding.
+ */
+function expectCleanExit(run: Run): void {
+  expect(run.signal).toBeNull()
+  expect(run.status).toBe(0)
 }
 
 /** Reads of the hook's own source are noise; reads of plugin state are not. */
@@ -139,6 +167,7 @@ function stateReads(run: Run): string[] {
 }
 
 beforeAll(() => {
+  node = resolveNode()
   fixtures = mkdtempSync(join(tmpdir(), 'preamble-gate-'))
   mkdirSync(fixtures, { recursive: true })
   preload = join(fixtures, 'preload.cjs')
@@ -194,7 +223,7 @@ describe('discord-postreply-preamble gate', () => {
       expect(run.requests).toEqual([])
       expect(stateReads(run)).toEqual([])
       expect(run.writes).toEqual([])
-      expect(run.status).toBe(0)
+      expectCleanExit(run)
     })
 
     test(`standalone branch does nothing when the flag is ${label}`, () => {
@@ -202,7 +231,7 @@ describe('discord-postreply-preamble gate', () => {
       expect(run.requests).toEqual([])
       expect(stateReads(run)).toEqual([])
       expect(run.writes).toEqual([])
-      expect(run.status).toBe(0)
+      expectCleanExit(run)
     })
   }
 
@@ -216,7 +245,7 @@ describe('discord-postreply-preamble gate', () => {
   test('reply-tool branch posts to the persona channel when opted in', () => {
     const run = runHook(PREAMBLE_HOOK, replyToolPayload('reply-on'), { DISCORD_POSTREPLY_PREAMBLE: '1' })
     expect(run.requests).toEqual([`POST /api/v10/channels/${PERSONA_CHANNEL}/messages`])
-    expect(run.status).toBe(0)
+    expectCleanExit(run)
   })
 
   test('reply-tool branch on the primary channel posts there when opted in', () => {
@@ -232,13 +261,13 @@ describe('discord-postreply-preamble gate', () => {
       tool_input: { chat_id: PERSONA_CHANNEL, text: '' },
     }, { DISCORD_POSTREPLY_PREAMBLE: '1' })
     expect(run.requests).toEqual([`POST /api/v10/channels/${PERSONA_CHANNEL}/messages`])
-    expect(run.status).toBe(0)
+    expectCleanExit(run)
   })
 
   test('standalone branch posts to the persona channel when opted in', () => {
     const run = runHook(PREAMBLE_HOOK, bashPayload('bash-on'), { DISCORD_POSTREPLY_PREAMBLE: '1' })
     expect(run.requests).toEqual([`POST /api/v10/channels/${PERSONA_CHANNEL}/messages`])
-    expect(run.status).toBe(0)
+    expectCleanExit(run)
   })
 
   test('a reply carrying its own text is never duplicated, opted in or not', () => {
@@ -252,8 +281,13 @@ describe('discord-postreply-preamble gate', () => {
       tool_name: REPLY_TOOL,
       tool_input: { chat_id: TRIGGER_CHANNEL, text: 'the real answer' },
     }
-    expect(runHook(PREAMBLE_HOOK, payload, { DISCORD_POSTREPLY_PREAMBLE: '1' }).requests).toEqual([])
-    expect(runHook(PREAMBLE_HOOK, payload).requests).toEqual([])
+    for (const run of [
+      runHook(PREAMBLE_HOOK, payload, { DISCORD_POSTREPLY_PREAMBLE: '1' }),
+      runHook(PREAMBLE_HOOK, payload),
+    ]) {
+      expect(run.requests).toEqual([])
+      expectCleanExit(run)
+    }
   })
 })
 
@@ -274,6 +308,7 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
       transcript_path: transcript('stop-covered', entries),
     })
     expect(stop.requests).toEqual([])
+    expectCleanExit(stop)
 
     const preamble = runHook(PREAMBLE_HOOK, {
       session_id: 'stop-covered-preamble',
@@ -282,6 +317,7 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
       tool_input: { chat_id: TRIGGER_CHANNEL, text: '' },
     })
     expect(preamble.requests).toEqual([])
+    expectCleanExit(preamble)
   })
 
   test('closing text with no reply call still reaches the channel', () => {
@@ -292,5 +328,6 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
       ]),
     })
     expect(run.requests).toEqual([`POST /api/v10/channels/${PERSONA_CHANNEL}/messages`])
+    expectCleanExit(run)
   })
 })
