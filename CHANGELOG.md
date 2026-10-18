@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.2
+
+- No runtime change. The 0.10.1 gate tests spawned the hooks with
+  `process.execPath`, which under `bun test` is Bun — a runtime the hooks never
+  meet, since `hooks/hooks.json` invokes `node`. They now resolve `node`
+  explicitly and fail when it is absent rather than falling back, because the
+  fallback is the gap worth closing.
+
+- Each "no HTTPS request" assertion is now paired with a clean-exit check on
+  both status and signal. A hook that crashed or was killed also issues no
+  request, so silence alone was satisfiable by a broken harness rather than by
+  a holding gate.
+
+- 0.10.1's note that a reply carrying text was never duplicated is narrowed to
+  what the code supports: that reply call issues no second POST, which does not
+  mean an earlier non-reply preamble in the same turn never sent the same prose.
+
 ## 0.10.1
 
 - **`discord-postreply-preamble` is deactivated by default.** The hook
