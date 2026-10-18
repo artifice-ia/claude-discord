@@ -1,9 +1,41 @@
 # Changelog
 
+## 0.10.4
+
+- **New hook `discord-loop-tick.js` (PostToolUse).** When the model calls
+  `ScheduleWakeup` or `CronCreate`, the hook posts a tick announcement to
+  `persona.loops_channel`. If the key is absent in persona.md frontmatter the
+  hook exits silently, so bots without a loops channel are unaffected.
+
+  For `ScheduleWakeup`: a noop-false tick posts a new Discord message (phone
+  notification). A noop-true tick edits the previous message for that loop and
+  shows a streak count (`quiet x3`), because edits carry no push notification.
+  Loop identity is derived from `sha256(session_id + ":" + prompt).slice(0, 12)`;
+  including the session_id ensures a restarted session starts fresh state rather
+  than inheriting a stale quiet streak from a previous run.
+
+  For `CronCreate`: posts a single announcement with the cron expression and the
+  first line of the prompt.
+
+  Per-loop state (message id, streak) is kept in `/tmp/artifice-loop-tick-<id>.json`.
+
+  **Known limitation: cron ticks (loops fired by `CronCreate`, not by
+  `ScheduleWakeup`) never call a scheduling tool, so this hook cannot observe
+  them. Those ticks are invisible to this increment. A second increment can
+  address them separately — for example via a dedicated cron job or a different
+  hook event.**
+
+  `src/discord-loop-tick.test.ts` pins: noop-false posts once; noop-true edits
+  and does not post; three consecutive quiet ticks produce one message and a
+  streak of 3; missing loops_channel is a clean silent exit; non-scheduling
+  tools produce no request; CronCreate posts one announcement. All silence
+  assertions paired with clean-exit checks and positive controls.
+
 ## 0.10.3
 
 - Make the Discord reply guard own the first Stop; forward only after its one-block retry is exhausted.
 - Share transcript turn identity between Stop hooks and scope the guard to the payload transcript.
+- Fix bus-frame false trigger: fleet-bus frames now skipped (continue) in both backward scans rather than breaking the scan, preventing bot-to-bot traffic from hiding Fernando's genuine Discord message.
 
 ## 0.10.2
 
