@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.1
+
+- **`discord-postreply-preamble` is deactivated by default.** The hook
+  forwarded the turn's main-loop assistant text to Discord as a second,
+  blockquoted message. It did so on two paths: after any NON-reply tool call,
+  addressed to the persona channel, which is where the duplicate reasoning
+  operators saw came from; and after a reply call whose own `text` was empty.
+  A reply carrying text has always short-circuited the hook, so a normal
+  answer was never duplicated.
+
+  The hook keeps its registration in `hooks/hooks.json` and its code is
+  unchanged below the gate. A single guard at the top of the stdin handler
+  returns before the hook reads `persona.md`, its per-session state file or the
+  transcript, so no Discord request is reachable while the gate holds. Set
+  `DISCORD_POSTREPLY_PREAMBLE=1` in the bot's environment to restore both
+  paths.
+
+  **Forwarding coverage is deliberately reduced, and `discord-stop-forward.js`
+  does not make up the difference.** Stop decides on the last assistant entry
+  of the turn: a reply call counts as covered and its text is never inspected.
+  So a turn that narrates mid-turn and then calls reply with empty text now
+  reaches nobody. Stop still forwards closing text from a turn that never
+  calls reply at all, which is the slip it was written for, and that path is
+  untouched.
+
+  **Patch, not minor.** This is the operator-requested fix for unwanted
+  automatic forwarding, not the removal of a supported feature; the env
+  opt-in keeps the old behaviour available to anyone who relied on it.
+
+  `src/postreply-preamble-gate.test.ts` pins all of it: the gate against
+  unset, `0`, `true` and empty, each asserting no read, no state write and no
+  HTTPS request; a positive control on both branches under `=1`; and the
+  mid-turn-text to empty-reply transcript proving neither hook forwards it.
+
 ## 0.10.0
 
 - **Minor bump, not a patch.** CONTRIBUTING reserves `0.X.0` for new features
