@@ -340,6 +340,9 @@ test('Discord+compact: guard blocks then forwarder posts on retry', () => {
 // Mutation path: making isGenuineHumanTurn return true unconditionally causes this
 // test to fail — the scan stops at the unknown entry, treats it as a genuine human
 // turn, finds no Discord source in it, and returns not_discord.
+//
+// NOTE: under the three-outcome classifier this test still passes: <future-harness-thing>
+// is 'unknown', the guard skips unknown, finds Discord below, and blocks.
 test('unknown future harness entry between Discord msg and end: guard still blocks', () => {
   loadFixture('discord-then-unknown-harness')
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
@@ -347,12 +350,31 @@ test('unknown future harness entry between Discord msg and end: guard still bloc
 
 // TEST 7 — Genuine terminal turn above a Discord message: must return not_discord.
 //
-// A real non-Discord human turn (plain text, no XML wrapper, no harness flags) sits
-// MORE RECENTLY than a Discord message. The scan should stop at it, determine it is
-// not Discord, and return not_discord. The inversion must not make the scan walk PAST
-// genuine non-Discord human input to find an older Discord message.
+// A plain-text terminal input (no XML opener, no harness flags) sits MORE RECENTLY than
+// a Discord message. The scan must stop at it, confirm it is human but not Discord, and
+// return not_discord.
 test('genuine terminal turn above Discord message: guard does not block', () => {
   loadFixture('terminal-over-discord')
   expect(run(guard).stdout).toBe('')
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+// TEST 8 — Ohm's canary case (guard off): unknown entry blocks forwarding.
+//
+// Scenario: Fernando gets a Discord reply. He then types a private terminal task using
+// XML syntax: <task>Analyze my private local document; answer only here.</task>.
+// Claude answers with CANARY-PRIVATE-ANALYSIS. Stop hook fires. Guard is OFF.
+//
+// Under the open-ended XML regex (pre-three-outcome): <task>…</task> was classified as
+// harness → scan skipped it → found Discord trigger below → POSTED canary to Discord.
+// Wrong forward. Crossed a delivery boundary.
+//
+// Under the three-outcome classifier: <task>…</task> is 'unknown' (XML opener, not in
+// the named harness list). unknownEntries.length > 0 → forwarder exits without posting.
+//
+// Mutation: making the forwarder treat 'unknown' as 'harness' (skipping it instead of
+// gating on it) causes this test to fail — it posts CANARY-PRIVATE-ANALYSIS to Discord.
+test('Ohm canary: guard-off forwarder refuses when unknown entry sits before trigger', () => {
+  loadFixture('canary-with-unknown')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })

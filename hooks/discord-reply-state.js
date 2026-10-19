@@ -1,13 +1,42 @@
+// discord-reply-state.js
+//
+// THREE-OUTCOME CLASSIFICATION CONTRACT
+// ======================================
+// Every user entry is classified as exactly one of:
+//
+//   'harness'  — positively identified as harness-injected. Safe to skip in any context.
+//               Structural flags: turnCompanion, isCompactSummary, isVisibleInTranscriptOnly.
+//               Functional: isStopHookFeedback, isBusFrame.
+//               Content-structural: tool_result arrays (Claude Code tool call returns).
+//               Named local-command tags: <local-command-caveat>, <command-name>,
+//               <local-command-stdout>. Explicit list — NOT open-ended XML matching.
+//
+//   'human'    — positively identified as a genuine human turn.
+//               Discord channel message (has plugin source, not a bus frame).
+//               Plain-text terminal input (non-empty, does NOT open with an XML tag).
+//
+//   'unknown'  — cannot be classified. Has content, not in the harness list, not plain,
+//               not Discord. Example: <task>Analyze my private doc.</task>.
+//               ARBITRARY XML IS NOT PROOF OF HARNESS ORIGIN.
+//
+// Two consumers, two defaults:
+//   Guard:      may SKIP unknown — blocking is cheap, self-limiting, and loud.
+//   Forwarder:  must REFUSE on unknown — delivery crosses a boundary; wrong blocks are
+//               harmless, wrong forwards are not. An unknown between trigger and end
+//               means the forwarder cannot confirm what text belongs to the Discord turn.
+//
+// This asymmetry is the point. Do not collapse it back to two outcomes.
+
 // A blocking Stop hook's reason is appended by Claude Code as a `user` entry, so a
 // backward scan for the human turn finds IT and not the human. Captured on 2.1.303:
 //
 //   {"type":"user","message":{"role":"user","content":"Stop hook feedback:\n<reason>"},
 //    "isMeta":true,"userType":"external","entrypoint":"sdk-cli"}
 //
-// No turnCompanion, so the companion skip alone does not cover it. The match below is
-// deliberately narrow: isMeta alone is NOT a discriminator — real Discord channel entries
-// also carry isMeta:true at runtime (verified in session 34e5b924, 2026-10-19), so
-// all three conditions are required.
+// The match below is deliberately narrow: isMeta alone is NOT a discriminator — real
+// Discord channel entries also carry isMeta:true at runtime (verified session 34e5b924,
+// 2026-10-19; confirmed by Deet: 1513 entries in his own transcript carry isMeta
+// including Fernando's genuine messages). All three conditions are required.
 function isStopHookFeedback(entry) {
   if (!entry || entry.isMeta !== true) return false;
   const content = entry.message?.content;
@@ -19,13 +48,9 @@ function isStopHookFeedback(entry) {
 // not a trigger and not a terminator: breaking on it blocks the scan from finding
 // Fernando's genuine message underneath.
 //
-// NOTE: we match the opening <channel> tag's attribute string, not the full text.
-// A raw text search would misfire if Fernando quotes bus-frame attribute syntax in a
-// Discord message — "<channel ...fleet-bus...>his words</channel>" includes both strings.
-// Matching within the tag attributes only avoids that false positive.
-//
-// NOTE: turnOrigin === 'peer' is NOT a discriminator. All channel-injected entries carry
-// it, including Fernando's own Discord messages. The attribute check is the correct signal.
+// NOTE: we match within the tag attributes, not the full text. A raw text search would
+// misfire if Fernando quotes bus-frame attribute syntax in a Discord message. Matching
+// within the tag attributes only avoids that false positive.
 function isBusFrame(entry) {
   if (!entry || entry.type !== 'user') return false;
   const content = entry.message?.content;
@@ -35,88 +60,113 @@ function isBusFrame(entry) {
   return tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"') && tagAttrs.includes('source="fleet-bus"');
 }
 
-// Positive identification of a genuine human turn — the predicate the backward scan
-// stops on. The scan continues past everything else.
-//
-// THREE INSTANCES OF THE SAME CLASS broke this scan (images → turnCompanion fix; bus
-// frames → isBusFrame fix; compaction entries → isCompactSummary fix). Each time an
-// enumerated skip list grew by one and the NEXT harness entry type blinded it again.
-// The root cause: the default was "stop on unknowns." This function inverts that: return
-// true ONLY when an entry is positively identified as a genuine human turn; the scan
-// continues past everything else, including entry types we haven't seen yet.
-//
-// Two failure modes, not symmetric:
-//   skip-too-much → scan reaches an older Discord message → one duplicate block,
-//                   self-limiting, operator sees a message twice at worst
-//   skip-too-little → Fernando's message is lost silently with no alarm
-// The default belongs on the loud side.
-//
-// NOTE on isMeta: NOT used as an exclusion. Real Discord channel entries carry
-// isMeta:true at runtime (verified session 34e5b924, 2026-10-19). Using it as a
-// blanket exclusion would silently drop Fernando's messages.
-function isGenuineHumanTurn(entry) {
-  if (!entry || entry.type !== 'user') return false;
+// Classify a user entry as 'harness', 'human', or 'unknown'.
+// See the module contract at the top of this file.
+function classifyEntry(entry) {
+  if (!entry || entry.type !== 'user') return 'unknown';
 
-  // Structural flags the harness sets on injected entries — checked without parsing.
-  if (entry.turnCompanion) return false;          // image placeholder entry
-  if (entry.isCompactSummary) return false;        // /compact and auto-compaction summary
-  if (entry.isVisibleInTranscriptOnly) return false; // harness-only metadata
-
-  // Functional predicates for injected entries without a dedicated structural flag.
-  if (isStopHookFeedback(entry)) return false;
-  if (isBusFrame(entry)) return false;
+  // === POSITIVE HARNESS: structural flags ===
+  if (entry.turnCompanion) return 'harness';
+  if (entry.isCompactSummary) return 'harness';
+  if (entry.isVisibleInTranscriptOnly) return 'harness';
+  if (isStopHookFeedback(entry)) return 'harness';
+  if (isBusFrame(entry)) return 'harness';
 
   const content = entry.message?.content;
+
+  // === POSITIVE HARNESS: tool call results ===
+  // These are harness-internal — Claude Code injects a user entry for each tool_use result.
+  // They carry no human-authored text; classifying them as unknown would trigger the
+  // forwarder's boundary gate on ordinary tool-use turns.
+  if (Array.isArray(content) && content.length > 0 && content.every(c => c && c.type === 'tool_result')) {
+    return 'harness';
+  }
+
   const text = typeof content === 'string' ? content
     : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
 
-  if (!text.trim()) return false;
+  // === POSITIVE HARNESS: named local-command injection tags ===
+  // Explicit list — three tags only. Arbitrary XML is not proof of harness origin.
+  if (text.startsWith('<local-command-caveat>')) return 'harness';
+  if (text.startsWith('<command-name>')) return 'harness';
+  if (text.startsWith('<local-command-stdout>')) return 'harness';
 
-  // Generic harness-wrapper catch. The harness injects entries whose content opens
-  // with an XML-ish tag (<local-command-caveat>, <command-name>, <local-command-stdout>,
-  // and any future type). A genuine Discord message also opens with a <channel> tag,
-  // but carries source="plugin:artifice-discord:artifice-discord" — the exception below
-  // lets it through. Everything else that starts <tag… without that attribute is harness.
-  if (/^<[a-z][a-z0-9-]*[\s>]/i.test(text.trimStart())
-      && !text.includes('source="plugin:artifice-discord:artifice-discord"')) {
-    return false;
-  }
+  if (!text.trim()) return 'unknown';
 
-  return true;
+  // === POSITIVE HUMAN: Discord channel message ===
+  // (bus frames already caught above; this is Fernando's genuine message)
+  if (text.includes('source="plugin:artifice-discord:artifice-discord"')) return 'human';
+
+  // === POSITIVE HUMAN: plain-text terminal input ===
+  // Does NOT open with an XML tag — we can confirm it's human-generated, not a
+  // harness or an ambiguous XML-wrapped task.
+  if (!/^<[a-z]/i.test(text.trimStart())) return 'human';
+
+  // === UNKNOWN ===
+  // Has text, not in the harness list, not plain, not Discord. Could be
+  // <task>Analyze my private doc; answer only here.</task> or any other
+  // XML-opened message from Fernando. We cannot classify — do not risk
+  // delivery boundary crossing.
+  return 'unknown';
 }
 
-// Convenience negation — used in discord-stop-forward.js where "skip harness" reads
-// more naturally than "skip non-genuine". Must be defined as the negation; isGenuineHumanTurn
-// is the authority.
+// Convenience: true when the entry is positively identified as a genuine human turn.
+// Used in the guard's scan; exportable for callers that need a boolean.
+function isGenuineHumanTurn(entry) {
+  return classifyEntry(entry) === 'human';
+}
+
+// Convenience negation — keeps callers that read "skip harness" naturally.
+// isGenuineHumanTurn and classifyEntry are the authority; this is derived.
 function isHarnessEntry(entry) {
-  return !isGenuineHumanTurn(entry);
+  return classifyEntry(entry) === 'harness';
 }
 
-// Shared turn identity and reply verdict for both Stop hooks.
-// Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
+// Shared turn identity, reply verdict, and boundary evidence for both Stop hooks.
+//
+// Returns:
+//   status      — 'discord_no_reply' | 'discord_replied' | 'not_discord'
+//   key         — `${sessionFile}:${triggerIdx}` (opaque, used for claim files)
+//   triggerIdx  — array index of the Discord trigger entry, or -1
+//   unknownEntries — indices of unknown user entries found between trigger and the
+//                    end of the transcript (i.e., after trigger in sequence, encountered
+//                    before trigger in the backward scan). The forwarder uses this to
+//                    refuse delivery when ANY unknown entry sits in that window.
+//                    Always an array; empty when there are none.
 function discordReplyState(sessionFile, entries) {
   let lastDiscordIdx = -1;
+  const unknownEntries = [];
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type !== 'user') continue;
 
-    // Skip everything the harness injects. Stop ONLY on genuine human turns.
-    // See isGenuineHumanTurn for the inversion rationale.
-    if (!isGenuineHumanTurn(e)) continue;
+    const cls = classifyEntry(e);
 
+    if (cls === 'harness') continue;
+
+    if (cls === 'unknown') {
+      // Guard behavior: skip unknown (blocking is cheap and self-limiting).
+      // Track the index so the forwarder can apply its stricter rule.
+      unknownEntries.push(i);
+      continue;
+    }
+
+    // cls === 'human' — this is the most recent genuine human turn. Stop here.
     const content = e.message?.content;
-    const textParts = Array.isArray(content)
+    const text = Array.isArray(content)
       ? content.filter(c => c.type === 'text').map(c => c.text).join('')
       : (typeof content === 'string' ? content : '');
 
-    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    if (text.includes('source="plugin:artifice-discord:artifice-discord"')) {
       lastDiscordIdx = i;
     }
     break;
   }
 
-  if (lastDiscordIdx === -1) return { status: 'not_discord', key: null };
+  if (lastDiscordIdx === -1) {
+    return { status: 'not_discord', key: null, triggerIdx: -1, unknownEntries };
+  }
   const key = `${sessionFile}:${lastDiscordIdx}`;
 
   for (let i = lastDiscordIdx + 1; i < entries.length; i++) {
@@ -127,10 +177,12 @@ function discordReplyState(sessionFile, entries) {
     const hasReply = content.some(
       c => c.type === 'tool_use' && c.name && c.name.includes('discord') && c.name.includes('reply')
     );
-    if (hasReply) return { status: 'discord_replied', key };
+    if (hasReply) {
+      return { status: 'discord_replied', key, triggerIdx: lastDiscordIdx, unknownEntries };
+    }
   }
 
-  return { status: 'discord_no_reply', key };
+  return { status: 'discord_no_reply', key, triggerIdx: lastDiscordIdx, unknownEntries };
 }
 
-module.exports = { discordReplyState, isStopHookFeedback, isBusFrame, isHarnessEntry };
+module.exports = { discordReplyState, classifyEntry, isGenuineHumanTurn, isStopHookFeedback, isBusFrame, isHarnessEntry };

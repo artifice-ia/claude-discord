@@ -1,0 +1,4 @@
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hey kat</channel>"}]}}
+{"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"tool_use","id":"r1","name":"mcp__plugin_artifice-discord_artifice-discord__reply","input":{"chat_id":"123","text":"hi"}}]}}
+{"type":"user","message":{"content":"<task>Analyze my private local document; answer only here.</task>"}}
+{"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"CANARY-PRIVATE-ANALYSIS"}]}}
