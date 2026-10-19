@@ -40,6 +40,7 @@ const entries = readFileSync(path, 'utf8').split('\n')
 const counts = { harness_structural: 0, harness_textual: 0, human: 0, unknown: 0 }
 const unknownTags = {}
 const textualTags = {}
+const originKinds = {}
 
 for (const e of entries) {
   if (e.type !== 'user') continue
@@ -60,6 +61,9 @@ for (const e of entries) {
   if (cls === 'harness' && evidence === 'textual' && tag) {
     textualTags[tag] = (textualTags[tag] ?? 0) + 1
   }
+  // origin.kind distribution — the primary provenance evidence.
+  const ok = e.origin?.kind ?? '(no origin)'
+  originKinds[ok] = (originKinds[ok] ?? 0) + 1
 }
 
 const total = counts.harness_structural + counts.harness_textual + counts.human + counts.unknown
@@ -68,6 +72,11 @@ console.log(`  harness (structural): ${counts.harness_structural}`)
 console.log(`  harness (textual):    ${counts.harness_textual}  ← forwarder refuses on these`)
 console.log(`  human:                ${counts.human}`)
 console.log(`  unknown:              ${counts.unknown}`)
+
+console.log('\norigin.kind distribution (primary provenance — set by Claude Code runtime):')
+for (const [ok, n] of Object.entries(originKinds).sort((a, b) => b[1] - a[1])) {
+  console.log(`  ${ok}: ${n}`)
+}
 
 if (counts.harness_textual > 0) {
   console.log('\ntextual-harness tag breakdown (tag name only — forwarder gates on these):')

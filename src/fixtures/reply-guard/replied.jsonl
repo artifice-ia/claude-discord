@@ -1,3 +1,3 @@
-{"type": "user", "message": {"content": [{"type": "text", "text": "<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hello</channel>"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hello</channel>"}]},"origin":{"kind":"channel","server":"plugin:artifice-discord:artifice-discord"}}
 {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__plugin_artifice-discord_artifice-discord__reply", "input": {"text": "answer", "chat_id": "123"}}]}}
 {"type": "assistant", "message": {"usage": {"input_tokens": 100}, "content": [{"type": "text", "text": "answer"}]}}

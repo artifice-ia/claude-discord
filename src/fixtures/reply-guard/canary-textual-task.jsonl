@@ -1,3 +1,3 @@
-{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hey kat</channel>"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hey kat</channel>"}]},"origin":{"kind":"channel","server":"plugin:artifice-discord:artifice-discord"}}
 {"type":"user","message":{"content":"<task-notification>\n<task-id>fake</task-id>\n<status>completed</status>\n<summary>analyze my private data</summary>\n</task-notification>"}}
 {"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"CANARY-TASK-LEAK"}]}}

@@ -91,8 +91,12 @@ function transcript(name: string, entries: unknown[]): string {
 
 const discordTrigger = `<channel source="plugin:artifice-discord:artifice-discord" chat_id="${TRIGGER_CHANNEL}" user="someone">do the thing</channel>`
 
-function userEntry(text: string) {
-  return { type: 'user', message: { content: text } }
+function userEntry(text: string, opts?: { origin?: object }) {
+  return { type: 'user', ...(opts?.origin ? { origin: opts.origin } : {}), message: { content: text } }
+}
+const DISCORD_ORIGIN = { kind: 'channel', server: 'plugin:artifice-discord:artifice-discord' }
+function discordEntry(text: string) {
+  return userEntry(text, { origin: DISCORD_ORIGIN })
 }
 
 function assistantText(text: string) {
@@ -190,7 +194,7 @@ describe('discord-postreply-preamble gate', () => {
     return {
       session_id: session,
       transcript_path: transcript(session, [
-        userEntry(discordTrigger),
+        discordEntry(discordTrigger),
         assistantText('mid-turn narration that never reached Discord'),
         assistantReply(''),
       ]),
@@ -204,7 +208,7 @@ describe('discord-postreply-preamble gate', () => {
     return {
       session_id: session,
       transcript_path: transcript(session, [
-        userEntry(discordTrigger),
+        discordEntry(discordTrigger),
         assistantText('narration emitted while a tool was running'),
       ]),
       tool_name: 'Bash',
@@ -253,7 +257,7 @@ describe('discord-postreply-preamble gate', () => {
     const run = runHook(PREAMBLE_HOOK, {
       session_id: session,
       transcript_path: transcript(session, [
-        userEntry(discordTrigger),
+        discordEntry(discordTrigger),
         assistantText('mid-turn narration that never reached Discord'),
         assistantReply(''),
       ]),
@@ -274,7 +278,7 @@ describe('discord-postreply-preamble gate', () => {
     const payload = {
       session_id: 'reply-with-text',
       transcript_path: transcript('reply-with-text', [
-        userEntry(discordTrigger),
+        discordEntry(discordTrigger),
         assistantText('narration'),
         assistantReply('the real answer'),
       ]),
@@ -300,7 +304,7 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
    */
   test('mid-turn text followed by an empty-text reply reaches neither hook', () => {
     const entries = [
-      userEntry(discordTrigger),
+      discordEntry(discordTrigger),
       assistantText('mid-turn narration that never reached Discord'),
       assistantReply(''),
     ]
@@ -323,7 +327,7 @@ describe('discord-stop-forward is not a replacement for the preamble hook', () =
   test('closing text with no reply call reaches the channel with guard disabled', () => {
     const run = runHook(STOP_HOOK, {
       transcript_path: transcript('stop-leaked', [
-        userEntry(discordTrigger),
+        discordEntry(discordTrigger),
         assistantText('closing text the agent forgot to send'),
       ]),
     }, { DISCORD_REPLY_GUARD: 'off' })
