@@ -196,7 +196,11 @@ process.stdin.on('end', async () => {
 
   // Unknown-boundary gate (FORWARDER only — stricter than the guard).
   // The guard may skip unknown entries; the forwarder must refuse.
-  if (unknownEntries.length > 0) process.exit(0)
+  // Log the refusal: a silent gate is indistinguishable from the feature being broken.
+  if (unknownEntries.length > 0) {
+    console.error(`[discord-stop-forward] refusing to forward: ${unknownEntries.length} unknown ${unknownEntries.length === 1 ? 'entry' : 'entries'} in window (indices: ${unknownEntries.join(', ')})`)
+    process.exit(0)
+  }
 
   const triggerEntry = entries[triggerIdx]
   const triggerContent = textOf(triggerEntry && triggerEntry.message && triggerEntry.message.content)

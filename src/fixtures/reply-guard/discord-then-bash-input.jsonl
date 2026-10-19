@@ -1,0 +1,3 @@
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">deploy status?</channel>"}]}}
+{"type":"user","message":{"content":"<bash-input>git log --oneline -5</bash-input>\n<bash-stdout>abc1234 fix(auth): patch session expiry\n</bash-stdout>\n<bash-stderr></bash-stderr>"}}
+{"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"last five commits look clean, deploy is green"}]}}

@@ -8,8 +8,10 @@
 //               Structural flags: turnCompanion, isCompactSummary, isVisibleInTranscriptOnly.
 //               Functional: isStopHookFeedback, isBusFrame.
 //               Content-structural: tool_result arrays (Claude Code tool call returns).
-//               Named local-command tags: <local-command-caveat>, <command-name>,
-//               <local-command-stdout>. Explicit list — NOT open-ended XML matching.
+//               Named injection tags (explicit list — NOT open-ended XML matching):
+//               local-command: <local-command-caveat>, <command-name>, <local-command-stdout>
+//               bash passthrough: <bash-input>, <bash-stdout>, <bash-stderr>
+//               task: <task-notification>
 //
 //   'human'    — positively identified as a genuine human turn.
 //               Discord channel message (has plugin source, not a bus frame).
@@ -85,11 +87,17 @@ function classifyEntry(entry) {
   const text = typeof content === 'string' ? content
     : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
 
-  // === POSITIVE HARNESS: named local-command injection tags ===
-  // Explicit list — three tags only. Arbitrary XML is not proof of harness origin.
+  // === POSITIVE HARNESS: named injection tags (explicit list) ===
+  // Local-command tags (Claude Code injects these when the user runs a /command):
   if (text.startsWith('<local-command-caveat>')) return 'harness';
   if (text.startsWith('<command-name>')) return 'harness';
   if (text.startsWith('<local-command-stdout>')) return 'harness';
+  // Bash passthrough tags (Claude Code injects these for `!` terminal commands):
+  if (text.startsWith('<bash-input>')) return 'harness';
+  if (text.startsWith('<bash-stdout>')) return 'harness';
+  if (text.startsWith('<bash-stderr>')) return 'harness';
+  // Task notification (Claude Code injects when a background agent completes):
+  if (text.startsWith('<task-notification>')) return 'harness';
 
   if (!text.trim()) return 'unknown';
 

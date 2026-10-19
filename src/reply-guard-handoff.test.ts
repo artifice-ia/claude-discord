@@ -378,3 +378,33 @@ test('Ohm canary: guard-off forwarder refuses when unknown entry sits before tri
   loadFixture('canary-with-unknown')
   expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })
+
+// TEST 9 — bash-input harness tags: forwarder still posts (not blocked by boundary gate).
+//
+// <bash-input>/<bash-stdout>/<bash-stderr> entries appear when Fernando runs `!` bash
+// commands during a Discord-triggered turn. Previous commits would have classified them
+// as 'unknown' (XML opener, not in the named list) and silently disabled the forwarder
+// for most turns. They are documented Claude Code injections — added to the named
+// harness list in this commit. The forwarder must still post across them.
+//
+// Fixture: real bash-input structure (bash-input/stdout/stderr as a single entry;
+// structurally accurate, content sanitized — no credentials).
+test('bash passthrough entries in window: forwarder still posts (guard-off)', () => {
+  loadFixture('discord-then-bash-input')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})
+
+// TEST 10 — task-notification harness tag: forwarder still posts (not blocked).
+//
+// <task-notification> entries appear when a background agent finishes. Same failure mode
+// as bash-input: previously 'unknown', would disable the forwarder on most agent turns.
+// Added to named harness list. Fixture from Kat's real transcript (session 34e5b924,
+// entry 1144 — IDs and content sanitized, structure preserved).
+test('task-notification entry in window: forwarder still posts (guard-off)', () => {
+  loadFixture('discord-then-task-notification')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})
