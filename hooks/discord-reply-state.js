@@ -9,52 +9,74 @@
 //     structural  — a runtime field the harness sets that a user cannot forge by
 //                   typing. Primary: `origin.kind` (see Origin-First Design below).
 //                   Secondary: turnCompanion, isCompactSummary, isVisibleInTranscript-
-//                   Only, isMeta (for stop-hook feedback), tool_result arrays.
+//                   Only, isMeta (for stop-hook feedback + local-command-caveat),
+//                   tool_result arrays.
 //
 //     textual     — tag matched only in content text. A user can paste the same bytes.
-//                   Examples: <bash-input>, <command-name>. Census confirms coverage;
-//                   does NOT confirm exclusivity. (Ohm's correction, 2026-10-19)
+//                   Census confirms coverage; does NOT confirm exclusivity.
 //
 //   'human'    — positively identified as a genuine human turn.
-//                Channel injection with origin.kind==='channel' and no fleet-bus flag.
-//                Or: promptSource==='typed', turnOrigin==='human', origin.kind==='human'.
-//                Or: plain-text terminal input (no XML opener, no origin required).
+//                Carries optional `channel: 'discord'` sub-field when the turn
+//                was a channel plugin injection (see below). WITHOUT that sub-field,
+//                the entry is a terminal turn, regardless of text content.
 //
-//   'unknown'  — cannot be classified. Has content, not in the harness list, not plain,
-//                not Discord. ARBITRARY XML IS NOT PROOF OF HARNESS ORIGIN.
+//   'unknown'  — cannot be classified. Not harness, not plain, not Discord.
 //
 // ORIGIN-FIRST DESIGN
 // ===================
-// `entry.origin.kind` is set by the Claude Code runtime, not by user-authored text.
-// A user cannot paste text that forges `origin.kind`. This is the primary provenance
-// evidence. ALL text parsing of channel tags now runs INSIDE an origin.kind==='channel'
-// guard — text is a sub-discriminator within proven provenance, never the provenance
-// itself.
+// `entry.origin.kind` is set by the Claude Code runtime, not user-authored text.
+// A user cannot forge `origin.kind` by pasting. All text inspection of channel tags
+// runs as a sub-discriminator INSIDE the origin.kind==='channel' branch only.
 //
-//   origin.kind === 'channel'          → channel plugin injection. Sub-discriminate:
-//                                          fleet-bus tag attrs → harness (structural)
-//                                          otherwise           → human (structural)
-//   origin.kind === 'task-notification' → harness (structural). Stronger than promptSource.
-//   origin.kind === 'human'             → human (structural)
-//   turnOrigin  === 'human'             → human (structural; also catches typed entries)
-//   promptSource === 'typed'            → human (structural)
-//   turnOrigin  === 'scheduled'         → harness (structural; /loop entries)
+//   origin.kind === 'channel'           → channel plugin injection.
+//                                          fleet-bus text → { class:'harness', evidence:'structural' }
+//                                          else           → { class:'human',   evidence:'structural', channel:'discord' }
+//   origin.kind === 'task-notification' → { class:'harness', evidence:'structural' }
+//   origin.kind === 'human'             → { class:'human',   evidence:'structural' }   ← NO channel field
+//   turnOrigin  === 'human'             → { class:'human',   evidence:'structural' }   ← NO channel field
+//   promptSource === 'typed'            → { class:'human',   evidence:'structural' }   ← NO channel field
+//   turnOrigin  === 'scheduled'         → { class:'harness', evidence:'structural' }
 //
-// MISSING origin KEY IS NOT EVIDENCE: 773/898 entries in real transcripts have none —
-// the field postdates them and tool_result entries never carry it. Missing origin falls
-// through to structural flags (turnCompanion, etc.) then the textual tier. Conservative.
+// CHANNEL SUB-FIELD SEMANTICS
+// ===========================
+// `channel: 'discord'` means: the harness proved this entry came from a channel
+// plugin, and the text identifies it as a Discord message (not fleet-bus).
+//
+// Entries classified human WITHOUT `channel` are TERMINAL input, regardless of what
+// their text says. A paste that contains the plugin source string but was typed in
+// the terminal carries origin.kind==='human' — the runtime proved that. It must never
+// become the Discord trigger.
+//
+// MISSING origin KEY IS NOT EVIDENCE
+// ====================================
+// Entries without `origin` are handled conservatively:
+//   <channel> text with plugin source AND no fleet-bus → { class:'human', evidence:'textual', channel:'discord' }
+//   <channel> text with fleet-bus                      → { class:'harness', evidence:'textual' }
+//   Other known harness tags                           → { class:'harness', evidence:'textual' }
+//   Plain text                                         → { class:'human',   evidence:'structural' }
+//   Unknown XML                                        → { class:'unknown' }
 //
 // TWO CONSUMERS, TWO DEFAULTS
 // ===========================
-//   Guard:      skips harness (both tiers) and unknown. Blocking is cheap.
-//   Forwarder:  skips structural-harness only. Textual-harness → unknownEntries →
-//               refuses to post. Wrong blocks are loud and harmless; wrong forwards
-//               cross an irreversible delivery boundary.
+//   Guard:     triggers on any discord_no_reply status. Skips all harness + unknown.
+//              Non-Discord human entries → continue scanning backwards.
 //
-// The forwarder fires less often than before: turns where <command-name>, <bash-input>,
-// or other textual-only harness tags appear without structural backing will not forward.
-// In a normal turn the only entries between Fernando's message and the closing text are
-// tool_result arrays (structural), so the forwarder fires cleanly in the common case.
+//   Forwarder: refuses when unknownEntries is non-empty. Structural-harness and
+//              structural Discord are safe. Everything else is refused.
+//
+// SCAN CONTRACT
+// =============
+// discordReplyState scans entries backwards looking for a Discord trigger:
+//   - harness (textual) → unknownEntries, continue
+//   - harness (structural) → skip, continue
+//   - unknown → unknownEntries, continue
+//   - human, channel='discord' (structural) → trigger; break
+//   - human, channel='discord' (textual)    → trigger; unknownEntries (old transcript); break
+//   - human, no channel → unknownEntries, continue   ← PROVEN TERMINAL: never a trigger
+//
+// Proven-human terminal input is never the Discord trigger, regardless of text content.
+// This closes the variant where a pasted plugin-source string in a terminal entry
+// becomes the trigger via a text fallback in the scan.
 //
 // CAVEAT: origin is set by Claude Code, so this inherits whatever that runtime
 // guarantees. It is a much stronger class of evidence than user-typed text.
@@ -67,19 +89,19 @@ function getEntryText(content) {
   return '';
 }
 
-// Stop hook feedback — caught before origin checks so `isMeta` cannot be confused
-// with Discord entries (which also carry isMeta:true but have origin.kind==='channel').
-// All three conditions are required: isMeta + user type + text prefix.
+// Stop hook feedback — caught before origin checks to avoid isMeta confusion.
+// Discord entries also carry isMeta:true but have origin.kind==='channel' (handled first).
 function isStopHookFeedback(entry) {
   if (!entry || entry.isMeta !== true) return false;
   const content = entry.message?.content;
   return typeof content === 'string' && content.startsWith('Stop hook feedback:');
 }
 
-// Classify a user entry. Returns { class: 'harness'|'human'|'unknown', evidence: 'structural'|'textual' }.
+// Classify a user entry.
+// Returns { class: 'harness'|'human'|'unknown', evidence: 'structural'|'textual', channel?: 'discord' }
 //
-// The evidence tier matters to the FORWARDER: structural-harness → safe to skip;
-// textual-harness → added to unknownEntries → forwarder refuses to post.
+// `channel: 'discord'` means the entry was proven to be a channel plugin injection
+// that is a Discord message. WITHOUT this field, a 'human' entry is terminal input.
 function classifyEntry(entry) {
   if (!entry || entry.type !== 'user') {
     return { class: 'unknown', evidence: 'structural' };
@@ -98,31 +120,29 @@ function classifyEntry(entry) {
 
   // === STRUCTURAL: runtime origin flags (primary provenance evidence) ===
   //
-  // `origin.kind` is set by the Claude Code runtime — not user-authored text.
-  // A pasted channel tag cannot forge this field. All text-based channel inspection
-  // runs as a sub-discriminator INSIDE the origin.kind==='channel' branch only.
+  // `origin.kind` is set by Claude Code — not user-authored text.
+  // Text inspection of channel content runs ONLY inside the origin.kind==='channel' branch.
   const originKind = entry.origin?.kind;
 
   if (originKind === 'channel') {
-    // Provenance proven: this entry came through a channel plugin injection.
-    // NOW use text to distinguish fleet-bus from a real Discord message.
+    // Provenance proven by origin.kind. Text is a sub-discriminator only.
     const tagAttrs = text.match(/<channel\s([^>]*)>/)?.[1] ?? '';
     if (tagAttrs.includes('source="fleet-bus"')) {
-      return { class: 'harness', evidence: 'structural' }; // fleet-bus frame
+      return { class: 'harness', evidence: 'structural' };
     }
-    return { class: 'human', evidence: 'structural' }; // Discord from Fernando (or other channel plugin)
+    return { class: 'human', evidence: 'structural', channel: 'discord' };
   }
 
   if (originKind === 'task-notification') {
     return { class: 'harness', evidence: 'structural' };
   }
 
-  // Human origin indicators — any one is sufficient.
+  // Proven terminal input. NO channel field — never a Discord trigger regardless of text.
   if (originKind === 'human' || entry.promptSource === 'typed' || entry.turnOrigin === 'human') {
     return { class: 'human', evidence: 'structural' };
   }
 
-  // /loop scheduled turns — runtime sets turnOrigin='scheduled', no origin key.
+  // /loop scheduled turns.
   if (entry.turnOrigin === 'scheduled') {
     return { class: 'harness', evidence: 'structural' };
   }
@@ -131,9 +151,8 @@ function classifyEntry(entry) {
   if (entry.turnCompanion) return { class: 'harness', evidence: 'structural' };
   if (entry.isCompactSummary) return { class: 'harness', evidence: 'structural' };
   if (entry.isVisibleInTranscriptOnly) return { class: 'harness', evidence: 'structural' };
-  // <local-command-caveat> has no origin but carries isMeta:true (harness-set).
-  // Terminal-typed entries never have isMeta:true. Discord entries with isMeta:true are
-  // caught above by origin.kind==='channel'. Safe combination.
+  // <local-command-caveat> carries isMeta:true (harness-set). Terminal-typed entries
+  // never have isMeta:true. Discord entries with isMeta are caught above by origin.kind.
   if (entry.isMeta === true && text.startsWith('<local-command-caveat>')) {
     return { class: 'harness', evidence: 'structural' };
   }
@@ -141,28 +160,35 @@ function classifyEntry(entry) {
   if (!text.trim()) return { class: 'unknown', evidence: 'structural' };
 
   // === POSITIVE HUMAN: plain-text terminal input (no origin required) ===
-  // Non-XML opener means typed text, not a harness injection. Structural because
-  // the harness injects only XML-tagged content; plain text is always terminal input.
   if (!/^<[a-z]/i.test(text.trimStart())) {
     return { class: 'human', evidence: 'structural' };
   }
 
+  // === <channel> TAGS WITHOUT origin (old transcripts or text-only evidence) ===
+  // Without origin.kind, text inspection is the only option — textual evidence.
+  if (text.startsWith('<channel')) {
+    const tagAttrs = text.match(/<channel\s([^>]*)>/)?.[1] ?? '';
+    if (tagAttrs.includes('source="fleet-bus"')) {
+      return { class: 'harness', evidence: 'textual' };
+    }
+    if (tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"')) {
+      return { class: 'human', evidence: 'textual', channel: 'discord' };
+    }
+    return { class: 'unknown', evidence: 'textual' };
+  }
+
   // === TEXTUAL HARNESS: known injection tags without origin proof ===
-  // These tags appear in real harness output (coverage confirmed by census).
-  // Without origin.kind, we cannot prove they did not come from a human paste.
-  // Guard: skips these. Forwarder: refuses (unknownEntries).
+  // Census confirms these appear in harness output (coverage ≠ exclusivity).
   const TEXTUAL_HARNESS_TAGS = [
     '<bash-input>', '<bash-stdout>', '<bash-stderr>',
     '<command-name>', '<command-message>',
     '<local-command-caveat>', '<local-command-stdout>',
     '<task-notification>',
-    '<channel',  // pasted channel tag without origin.kind proof
   ];
   for (const tag of TEXTUAL_HARNESS_TAGS) {
     if (text.startsWith(tag)) return { class: 'harness', evidence: 'textual' };
   }
 
-  // === UNKNOWN ===
   return { class: 'unknown', evidence: 'textual' };
 }
 
@@ -174,8 +200,8 @@ function isHarnessEntry(entry) {
   return classifyEntry(entry).class === 'harness';
 }
 
-// Legacy: kept for external call sites but no longer used internally.
-// isBusFrame is now a sub-discriminator inside classifyEntry's origin.kind==='channel' branch.
+// Legacy: kept for external call sites. isBusFrame logic is now internal to classifyEntry
+// inside the origin.kind==='channel' branch.
 function isBusFrame(entry) {
   if (!entry || entry.type !== 'user') return false;
   const content = entry.message?.content;
@@ -190,9 +216,16 @@ function isBusFrame(entry) {
 //   status         — 'discord_no_reply' | 'discord_replied' | 'not_discord'
 //   key            — `${sessionFile}:${triggerIdx}` or null
 //   triggerIdx     — index of Discord trigger entry, or -1
-//   unknownEntries — indices of user entries in (triggerIdx, end] that are either
-//                    'unknown' class OR 'harness' with 'textual' evidence.
-//                    Guard ignores this; forwarder refuses when non-empty.
+//   unknownEntries — indices of user entries in the scan window that the forwarder
+//                    cannot safely skip: unknown class, textual-harness, textual Discord
+//                    triggers, and proven-terminal human entries (no channel field).
+//                    Forwarder refuses to post when this is non-empty.
+//
+// SCAN CONTRACT (no text-based provenance re-derivation):
+//   The trigger is found ONLY when r.channel === 'discord'. A proven-terminal human entry
+//   (origin.kind='human', promptSource='typed', or turnOrigin='human') adds to unknownEntries
+//   and the scan CONTINUES backwards looking for an older Discord message. This prevents a
+//   paste containing the plugin source string from becoming the trigger via a text fallback.
 function discordReplyState(sessionFile, entries) {
   let lastDiscordIdx = -1;
   const unknownEntries = [];
@@ -201,31 +234,30 @@ function discordReplyState(sessionFile, entries) {
     const e = entries[i];
     if (e.type !== 'user') continue;
 
-    const { class: cls, evidence } = classifyEntry(e);
+    const r = classifyEntry(e);
 
-    if (cls === 'harness') {
-      // Forwarder must refuse on textual-harness — add to unknownEntries.
-      // Guard skips all harness regardless.
-      if (evidence === 'textual') unknownEntries.push(i);
+    if (r.class === 'harness') {
+      if (r.evidence === 'textual') unknownEntries.push(i);
       continue;
     }
 
-    if (cls === 'unknown') {
+    if (r.class === 'unknown') {
       unknownEntries.push(i);
       continue;
     }
 
-    // cls === 'human' — most recent genuine human turn. Stop here.
-    // Origin-proven channel entries are Discord; plain-text are terminal.
-    const c = e.message?.content;
-    const t = Array.isArray(c)
-      ? c.filter(x => x.type === 'text').map(x => x.text).join('')
-      : (typeof c === 'string' ? c : '');
-
-    if (e.origin?.kind === 'channel' || t.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    // r.class === 'human'
+    if (r.channel === 'discord') {
+      // Found the Discord trigger. Old-transcript entries with textual evidence go into
+      // unknownEntries so the forwarder refuses delivery it cannot prove is safe.
       lastDiscordIdx = i;
+      if (r.evidence === 'textual') unknownEntries.push(i);
+      break;
     }
-    break;
+
+    // Proven human terminal input — NOT a Discord trigger regardless of text content.
+    // Add to unknownEntries and continue scanning backwards for an older Discord message.
+    unknownEntries.push(i);
   }
 
   if (lastDiscordIdx === -1) {

@@ -357,14 +357,25 @@ test('unknown future harness entry between Discord msg and end: guard still bloc
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
 })
 
-// TEST 7 — Genuine terminal turn above a Discord message: must return not_discord.
+// TEST 7 — Terminal turn above an unanswered Discord message: guard BLOCKS; forwarder refuses.
 //
-// A plain-text terminal input (no XML opener, no harness flags) sits MORE RECENTLY than
-// a Discord message. The scan must stop at it, confirm it is human but not Discord, and
-// return not_discord.
-test('genuine terminal turn above Discord message: guard does not block', () => {
+// UPDATED 2026-10-19 (Deet documented decision): a genuine human terminal entry no longer
+// terminates the scan. It is added to unknownEntries and the scan continues backwards,
+// looking for an unanswered Discord message underneath.
+//
+// TRADE: the guard can now block on a Discord message that is older than the most recent
+// human turn. This is a deliberate decision: if Fernando sent a Discord question, the model
+// started answering, and Fernando then ran something in the terminal, the Discord message is
+// still unanswered. The guard blocks. The forwarder refuses because the terminal entry is in
+// unknownEntries — delivery is withheld. The key is that no leak occurs: the guard blocks
+// (louder), and the forwarder refuses (conservative).
+//
+// Old behavior (before this commit): scan stopped at the terminal turn → not_discord → no block.
+//
+// Mutation: restore `break` on non-Discord human entries → guard reverts to not-blocking here.
+test('terminal turn above unanswered Discord: guard blocks, forwarder refuses (delivery withheld)', () => {
   loadFixture('terminal-over-discord')
-  expect(run(guard).stdout).toBe('')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
 })
 
@@ -487,4 +498,42 @@ test('control (real channel origin): guard blocks, forwarder posts (guard-off)',
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, { transcript_path: session }, true).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})
+
+// TESTS 17-19 — Scan provenance: proven-terminal entry must never become the Discord trigger.
+//
+// 5c3fec2 introduced origin.kind as primary provenance but left a text fallback in the
+// discordReplyState scan:
+//   if (e.origin?.kind === 'channel' || t.includes('source="plugin:artifice-discord..."'))
+// A terminal entry with origin.kind='human' (proven non-Discord by the runtime) became
+// the trigger if its text contained the plugin source string. Deet's probe:
+//   classify(paste) = {class:'human', evidence:'structural'}
+//   state = discord_no_reply  triggerIdx=0  unknownEntries=[]
+//   → forwarder POSTed the canary.
+//
+// Fix: scan checks ONLY r.channel === 'discord' (set by classifyEntry from origin.kind).
+// Non-Discord human entries → unknownEntries, continue (scan walks past them).
+// Only a channel='discord' result stops the scan and sets the trigger.
+//
+// TEST 17: Deet's probe — paste with origin.kind='human' alone. Must return not_discord.
+//   Mutation: restore `|| t.includes(...)` → triggerIdx=0, forwarder posts → test fails.
+// TEST 18: same paste AFTER a real Discord message. Discord is trigger; paste in
+//   unknownEntries; guard blocks; forwarder refuses.
+// TEST 19: old-transcript control — Discord entry with NO origin key. Text-based detection
+//   still finds it as trigger (channel='discord', textual), but the trigger itself lands
+//   in unknownEntries → guard blocks, forwarder refuses (cannot prove provenance).
+test('Deet probe (pasted plugin source, origin.kind=human, alone): guard not_discord', () => {
+  loadFixture('attack-pasted-discord-human-origin')
+  expect(run(guard).stdout).toBe('')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
+})
+test('pasted plugin source after real Discord: Discord is trigger, forwarder refuses', () => {
+  loadFixture('attack-pasted-after-real-discord')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
+})
+test('old-transcript Discord (no origin): guard blocks, forwarder refuses (textual trigger)', () => {
+  loadFixture('discord-no-origin')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })
