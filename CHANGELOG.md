@@ -17,14 +17,21 @@
   harness-injected entries to skip; the scan stops only on genuine human turns. An
   unrecognised harness entry type now skips silently rather than terminating the scan.
 
-  `isHarnessEntry` is exported so `discord-stop-forward.js` can use the same predicate
-  in its own backward scan. Both scans were affected; both are fixed. The old
-  per-function skips (`turnCompanion`, `isStopHookFeedback`, `isBusFrame`) are now
-  consolidated into `isHarnessEntry`, which also covers `isCompactSummary` (structural
-  flag, no content parsing) and the three local-command XML patterns.
+  The scan now uses `isGenuineHumanTurn()` — a positive test that returns `true` only
+  for entries we can confirm are genuine human turns. Everything else is skipped with
+  `continue`. An unrecognised harness entry type now skips silently. `isHarnessEntry`
+  remains exported as its negation for callers where "skip harness" reads more naturally.
 
-  Fixtures built from real entry structures captured in session 34e5b924 (2026-09-29) and
-  session 239e14bd; see `src/fixtures/reply-guard/README.md`.
+  Structural checks: `turnCompanion`, `isCompactSummary`, `isVisibleInTranscriptOnly`.
+  Functional predicates: `isStopHookFeedback`, `isBusFrame`.
+  Generic catch: XML-tag opener without the Discord plugin source string — catches
+  `<local-command-*>`, `<command-name>`, and any future injected tag.
+  Note: `isMeta` is NOT used for exclusion — real Discord channel entries carry
+  `isMeta:true` at runtime, so using it would silently drop Fernando's messages.
+
+  Both scans fixed: `discordReplyState` and the trigger scan in `discord-stop-forward.js`.
+  Six new tests; 171/171 pass. Fixtures from real transcript entries (34e5b924,
+  239e14bd); see `src/fixtures/reply-guard/README.md`.
 
 ## 0.10.4
 

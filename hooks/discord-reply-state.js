@@ -4,9 +4,10 @@
 //   {"type":"user","message":{"role":"user","content":"Stop hook feedback:\n<reason>"},
 //    "isMeta":true,"userType":"external","entrypoint":"sdk-cli"}
 //
-// No turnCompanion, so the companion skip above does not cover it. The match below is
-// deliberately narrow: isMeta alone is NOT a discriminator, as the comment in the scan
-// records, so all three conditions are required.
+// No turnCompanion, so the companion skip alone does not cover it. The match below is
+// deliberately narrow: isMeta alone is NOT a discriminator — real Discord channel entries
+// also carry isMeta:true at runtime (verified in session 34e5b924, 2026-10-19), so
+// all three conditions are required.
 function isStopHookFeedback(entry) {
   if (!entry || entry.isMeta !== true) return false;
   const content = entry.message?.content;
@@ -21,7 +22,7 @@ function isStopHookFeedback(entry) {
 // NOTE: we match the opening <channel> tag's attribute string, not the full text.
 // A raw text search would misfire if Fernando quotes bus-frame attribute syntax in a
 // Discord message — "<channel ...fleet-bus...>his words</channel>" includes both strings.
-// Matching within the tag attributes only avoids that false skip.
+// Matching within the tag attributes only avoids that false positive.
 //
 // NOTE: turnOrigin === 'peer' is NOT a discriminator. All channel-injected entries carry
 // it, including Fernando's own Discord messages. The attribute check is the correct signal.
@@ -34,46 +35,61 @@ function isBusFrame(entry) {
   return tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"') && tagAttrs.includes('source="fleet-bus"');
 }
 
-// Positive identification of harness-injected entries the backward scan should skip.
+// Positive identification of a genuine human turn — the predicate the backward scan
+// stops on. The scan continues past everything else.
 //
-// The scan uses this as a SKIP predicate, not a STOP predicate. Three entry types have
-// already blinded it: images (turnCompanion), bus frames (isBusFrame), and compaction
-// entries (isCompactSummary + local-command XML patterns). Each time the scan broke on
-// a newly-injected type, the fix enumerated it. Inverting the test — skip KNOWN harness
-// entries, stop ONLY on genuine human turns — means an unrecognised harness type skips
-// past silently rather than terminating the scan with not_discord.
+// THREE INSTANCES OF THE SAME CLASS broke this scan (images → turnCompanion fix; bus
+// frames → isBusFrame fix; compaction entries → isCompactSummary fix). Each time an
+// enumerated skip list grew by one and the NEXT harness entry type blinded it again.
+// The root cause: the default was "stop on unknowns." This function inverts that: return
+// true ONLY when an entry is positively identified as a genuine human turn; the scan
+// continues past everything else, including entry types we haven't seen yet.
 //
-// Genuine human turns are what fall through this function: Discord channel messages, and
-// direct CLI input that carries no harness XML wrapper.
-function isHarnessEntry(entry) {
+// Two failure modes, not symmetric:
+//   skip-too-much → scan reaches an older Discord message → one duplicate block,
+//                   self-limiting, operator sees a message twice at worst
+//   skip-too-little → Fernando's message is lost silently with no alarm
+// The default belongs on the loud side.
+//
+// NOTE on isMeta: NOT used as an exclusion. Real Discord channel entries carry
+// isMeta:true at runtime (verified session 34e5b924, 2026-10-19). Using it as a
+// blanket exclusion would silently drop Fernando's messages.
+function isGenuineHumanTurn(entry) {
   if (!entry || entry.type !== 'user') return false;
 
-  // Structural flags — checked without parsing content.
-  if (entry.turnCompanion) return true;
-  if (entry.isCompactSummary) return true;          // injected by /compact and auto-compaction
+  // Structural flags the harness sets on injected entries — checked without parsing.
+  if (entry.turnCompanion) return false;          // image placeholder entry
+  if (entry.isCompactSummary) return false;        // /compact and auto-compaction summary
+  if (entry.isVisibleInTranscriptOnly) return false; // harness-only metadata
 
-  // Functional predicates for entries without a dedicated structural flag.
-  if (isStopHookFeedback(entry)) return true;
-  if (isBusFrame(entry)) return true;
+  // Functional predicates for injected entries without a dedicated structural flag.
+  if (isStopHookFeedback(entry)) return false;
+  if (isBusFrame(entry)) return false;
 
   const content = entry.message?.content;
-  if (!content) return true;                        // empty content is never a genuine turn
+  const text = typeof content === 'string' ? content
+    : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
 
-  // Tool-result arrays are the harness handing tool output back to the model.
-  if (Array.isArray(content) && content.every(c => c.type === 'tool_result')) return true;
+  if (!text.trim()) return false;
 
-  // Local-command entries injected by the CLI for slash-command output.
-  // All three parts of a local command share this XML-tag pattern (captured from
-  // /plugin and /reload-plugins runs in session 34e5b924, 2026-09-29):
-  //   <local-command-caveat>Caveat: …</local-command-caveat>
-  //   <command-name>/compact</command-name> …
-  //   <local-command-stdout>Compacted …</local-command-stdout>
-  const text = typeof content === 'string' ? content : '';
-  if (text.startsWith('<local-command-caveat>')) return true;
-  if (text.startsWith('<command-name>')) return true;
-  if (text.startsWith('<local-command-stdout>')) return true;
+  // Generic harness-wrapper catch. The harness injects entries whose content opens
+  // with an XML-ish tag (<local-command-caveat>, <command-name>, <local-command-stdout>,
+  // and any future type). A genuine Discord message also opens with a <channel> tag,
+  // but carries source="plugin:artifice-discord:artifice-discord" — the exception below
+  // lets it through. Everything else that starts <tag… without that attribute is harness.
+  if (/^<[a-z][a-z0-9-]*[\s>]/i.test(text.trimStart())
+      && !text.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    return false;
+  }
 
-  return false;
+  return true;
+}
+
+// Convenience negation — used in discord-stop-forward.js where "skip harness" reads
+// more naturally than "skip non-genuine". Must be defined as the negation; isGenuineHumanTurn
+// is the authority.
+function isHarnessEntry(entry) {
+  return !isGenuineHumanTurn(entry);
 }
 
 // Shared turn identity and reply verdict for both Stop hooks.
@@ -85,9 +101,9 @@ function discordReplyState(sessionFile, entries) {
     const e = entries[i];
     if (e.type !== 'user') continue;
 
-    // Skip every entry the harness injects. The scan stops ONLY on genuine human
-    // turns (Discord messages or direct CLI input). See isHarnessEntry above.
-    if (isHarnessEntry(e)) continue;
+    // Skip everything the harness injects. Stop ONLY on genuine human turns.
+    // See isGenuineHumanTurn for the inversion rationale.
+    if (!isGenuineHumanTurn(e)) continue;
 
     const content = e.message?.content;
     const textParts = Array.isArray(content)

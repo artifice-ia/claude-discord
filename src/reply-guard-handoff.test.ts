@@ -327,3 +327,32 @@ test('Discord+compact: guard blocks then forwarder posts on retry', () => {
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
+
+// TEST 6 — Unknown future harness entry: guard must still block.
+//
+// This is THE test that proves the inversion is real. A fabricated
+// `<future-harness-thing>` entry appears between Fernando's Discord message and
+// the end of the transcript. Under the OLD enumerated-skip design this breaks
+// with not_discord — the unknown tag is not in the skip list. Under isGenuineHumanTurn
+// it falls through the XML-tag-opener catch (starts with <tag…, no plugin source)
+// and returns false → scan continues past it → finds Fernando's message → blocks.
+//
+// Mutation path: making isGenuineHumanTurn return true unconditionally causes this
+// test to fail — the scan stops at the unknown entry, treats it as a genuine human
+// turn, finds no Discord source in it, and returns not_discord.
+test('unknown future harness entry between Discord msg and end: guard still blocks', () => {
+  loadFixture('discord-then-unknown-harness')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+})
+
+// TEST 7 — Genuine terminal turn above a Discord message: must return not_discord.
+//
+// A real non-Discord human turn (plain text, no XML wrapper, no harness flags) sits
+// MORE RECENTLY than a Discord message. The scan should stop at it, determine it is
+// not Discord, and return not_discord. The inversion must not make the scan walk PAST
+// genuine non-Discord human input to find an older Discord message.
+test('genuine terminal turn above Discord message: guard does not block', () => {
+  loadFixture('terminal-over-discord')
+  expect(run(guard).stdout).toBe('')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
