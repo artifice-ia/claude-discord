@@ -34,6 +34,48 @@ function isBusFrame(entry) {
   return tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"') && tagAttrs.includes('source="fleet-bus"');
 }
 
+// Positive identification of harness-injected entries the backward scan should skip.
+//
+// The scan uses this as a SKIP predicate, not a STOP predicate. Three entry types have
+// already blinded it: images (turnCompanion), bus frames (isBusFrame), and compaction
+// entries (isCompactSummary + local-command XML patterns). Each time the scan broke on
+// a newly-injected type, the fix enumerated it. Inverting the test — skip KNOWN harness
+// entries, stop ONLY on genuine human turns — means an unrecognised harness type skips
+// past silently rather than terminating the scan with not_discord.
+//
+// Genuine human turns are what fall through this function: Discord channel messages, and
+// direct CLI input that carries no harness XML wrapper.
+function isHarnessEntry(entry) {
+  if (!entry || entry.type !== 'user') return false;
+
+  // Structural flags — checked without parsing content.
+  if (entry.turnCompanion) return true;
+  if (entry.isCompactSummary) return true;          // injected by /compact and auto-compaction
+
+  // Functional predicates for entries without a dedicated structural flag.
+  if (isStopHookFeedback(entry)) return true;
+  if (isBusFrame(entry)) return true;
+
+  const content = entry.message?.content;
+  if (!content) return true;                        // empty content is never a genuine turn
+
+  // Tool-result arrays are the harness handing tool output back to the model.
+  if (Array.isArray(content) && content.every(c => c.type === 'tool_result')) return true;
+
+  // Local-command entries injected by the CLI for slash-command output.
+  // All three parts of a local command share this XML-tag pattern (captured from
+  // /plugin and /reload-plugins runs in session 34e5b924, 2026-09-29):
+  //   <local-command-caveat>Caveat: …</local-command-caveat>
+  //   <command-name>/compact</command-name> …
+  //   <local-command-stdout>Compacted …</local-command-stdout>
+  const text = typeof content === 'string' ? content : '';
+  if (text.startsWith('<local-command-caveat>')) return true;
+  if (text.startsWith('<command-name>')) return true;
+  if (text.startsWith('<local-command-stdout>')) return true;
+
+  return false;
+}
+
 // Shared turn identity and reply verdict for both Stop hooks.
 // Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
 function discordReplyState(sessionFile, entries) {
@@ -43,42 +85,19 @@ function discordReplyState(sessionFile, entries) {
     const e = entries[i];
     if (e.type !== 'user') continue;
 
-    // SKIP TURN COMPANIONS. Reading an image appends a synthetic user entry whose body
-    // is a plain string like "[Image: original 1536x2048 ...]". It is type 'user', so the
-    // scan below treated it as the latest human turn, found no Discord marker and gave up.
-    // THE GUARD AGAINST FAILING TO REPLY AFTER AN IMAGE WAS THEREFORE BLINDED BY IMAGES --
-    // the one case it exists for was the one case it could not see.
-    //
-    // turnCompanion is the safe discriminator. In a 38k-entry transcript 60 entries carry
-    // it and none is a Discord message; isMeta is NOT safe, 1513 carry that including the
-    // real ones.
-    if (e.turnCompanion) continue;
-
-    // SKIP THE RETRY INJECTION. Without this the second Stop of a blocked turn judges the
-    // hook's own feedback entry as the newest human turn, returns not_discord, and the
-    // fallback that this whole handoff exists to preserve never fires.
-    if (isStopHookFeedback(e)) continue;
-
-    // SKIP BUS FRAMES. A fleet-bus frame is not a trigger and not a terminator — it is
-    // bot-to-bot traffic injected after Fernando's message. Breaking here would hide his
-    // genuine turn underneath.
-    if (isBusFrame(e)) continue;
+    // Skip every entry the harness injects. The scan stops ONLY on genuine human
+    // turns (Discord messages or direct CLI input). See isHarnessEntry above.
+    if (isHarnessEntry(e)) continue;
 
     const content = e.message?.content;
-    if (!content) continue;
-
-    if (Array.isArray(content) && content.every(c => c.type === 'tool_result')) continue;
-
     const textParts = Array.isArray(content)
       ? content.filter(c => c.type === 'text').map(c => c.text).join('')
       : (typeof content === 'string' ? content : '');
 
     if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
       lastDiscordIdx = i;
-      break;
-    } else {
-      break;
     }
+    break;
   }
 
   if (lastDiscordIdx === -1) return { status: 'not_discord', key: null };
@@ -98,4 +117,4 @@ function discordReplyState(sessionFile, entries) {
   return { status: 'discord_no_reply', key };
 }
 
-module.exports = { discordReplyState, isStopHookFeedback, isBusFrame };
+module.exports = { discordReplyState, isStopHookFeedback, isBusFrame, isHarnessEntry };

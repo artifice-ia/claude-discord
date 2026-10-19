@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.5
+
+- **Fix: compaction entries no longer blind the backward scan in `discord-reply-state.js`
+  and `discord-stop-forward.js`.** When `/compact` runs or auto-compaction triggers after
+  Fernando sends a Discord message, the harness injects up to four `user` entries between
+  his message and the end of the transcript: an `isCompactSummary` summary, a
+  `<local-command-caveat>` preamble, a `<command-name>/compact</command-name>` record, and
+  a `<local-command-stdout>Compacted…</local-command-stdout>` result. The previous scan
+  broke on the first of these it encountered, returned `not_discord`, and the guard never
+  blocked — Fernando's message went unanswered with no alarm.
+
+  Root cause: the scan enumerated known entry types to skip and broke on everything else.
+  This is the third instance of the same class (images, bus frames, compaction entries).
+  The fix inverts the test: the new helper `isHarnessEntry()` positively identifies
+  harness-injected entries to skip; the scan stops only on genuine human turns. An
+  unrecognised harness entry type now skips silently rather than terminating the scan.
+
+  `isHarnessEntry` is exported so `discord-stop-forward.js` can use the same predicate
+  in its own backward scan. Both scans were affected; both are fixed. The old
+  per-function skips (`turnCompanion`, `isStopHookFeedback`, `isBusFrame`) are now
+  consolidated into `isHarnessEntry`, which also covers `isCompactSummary` (structural
+  flag, no content parsing) and the three local-command XML patterns.
+
+  Fixtures built from real entry structures captured in session 34e5b924 (2026-09-29) and
+  session 239e14bd; see `src/fixtures/reply-guard/README.md`.
+
 ## 0.10.4
 
 - **New hook `discord-loop-tick.js` (PostToolUse).** When the model calls

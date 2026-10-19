@@ -265,3 +265,65 @@ test('genuine Discord frame still blocks and forwards (exclusion is not over-bro
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
+
+// COMPACTION-ENTRY EXCLUSION. When Fernando sends a Discord message and then /compact runs
+// (or auto-compaction triggers), the harness injects up to four user entries between his
+// message and the end of the transcript:
+//   isCompactSummary:true  — "This session is being continued…"
+//   <local-command-caveat> — CLI preamble (isMeta:true)
+//   <command-name>/compact — slash-command record
+//   <local-command-stdout> — "Compacted. Context window…"
+//
+// The old scan broke on the first of these it encountered (no explicit skip), returned
+// not_discord, and the guard never blocked — Fernando's message went unanswered.
+//
+// The new scan uses isHarnessEntry() to identify all four and continue past them.
+// isCompactSummary is a structural flag; the three local-command types are matched by
+// XML tag prefix on the content string.
+//
+// Fixtures built from real entry structures in Kat's transcripts — see
+// src/fixtures/reply-guard/README.md for provenance.
+
+// TEST 1 — Discord message below compact entries: guard must block.
+// Under the old scan this returned not_discord; under the fix it finds Fernando's message.
+test('Discord+compact: guard blocks on message below compaction entries', () => {
+  loadFixture('discord-then-compact')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+})
+
+// TEST 2 — Same transcript, reply added after compact entries: guard must NOT block.
+// Verifies the fix does not over-count; a replied turn stays replied even with compaction.
+test('Discord answered, compact entries appended: guard does not block', () => {
+  // Reuse discord-then-bus-replied shape: Discord msg → assistant reply → compact entries.
+  // Build it inline since no separate fixture is needed.
+  const replied = join(dir, 'projects', 'compact-replied.jsonl')
+  const base = readFileSync(join(import.meta.dir, 'fixtures', 'reply-guard', 'discord-then-compact.jsonl'), 'utf8')
+  // Prepend a reply before the compact entries by reconstructing: Discord + reply + compacts.
+  const discord = base.split('\n')[0]
+  const compacts = base.split('\n').slice(1).join('\n')
+  const replyEntry = JSON.stringify({
+    type: 'assistant',
+    message: { usage: { input_tokens: 100 }, content: [{ type: 'tool_use', id: 'x', name: 'mcp__plugin_artifice-discord_artifice-discord__reply', input: {} }] }
+  })
+  writeFileSync(replied, [discord, replyEntry, compacts].join('\n'))
+  expect(run(guard, { transcript_path: replied }).stdout).toBe('')
+})
+
+// TEST 3 — Compact entries only, no Discord message: must return not_discord.
+// Proves the inversion did not make the scan walk all the way to transcript start and
+// find something stale — an all-harness transcript correctly reports no Discord trigger.
+test('compact-only transcript: guard does not block, forwarder does not post', () => {
+  loadFixture('compact-only')
+  expect(run(guard).stdout).toBe('')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+// Full retry cycle: guard blocks on first Stop, forwarder posts on retry Stop.
+test('Discord+compact: guard blocks then forwarder posts on retry', () => {
+  loadFixture('discord-then-compact')
+  const first = { transcript_path: session, stop_hook_active: false }
+  expect(JSON.parse(run(guard, first).stdout).decision).toBe('block')
+  loadFixture('retry-discord-then-compact')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})

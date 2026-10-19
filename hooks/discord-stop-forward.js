@@ -16,7 +16,7 @@ const { createHash } = require('crypto')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
-const { discordReplyState, isStopHookFeedback, isBusFrame } = require('./discord-reply-state')
+const { discordReplyState, isStopHookFeedback, isBusFrame, isHarnessEntry } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -202,14 +202,11 @@ process.stdin.on('end', async () => {
         // thinking / tool_use(Bash) entries carry no text — keep walking
       }
     } else if (e.type === 'user') {
-      if (process.env.DISCORD_REPLY_GUARD !== 'off' && e.turnCompanion) continue
-      // Same reason as the shared scan: on a retry Stop this entry is the hook's own
-      // feedback, and treating it as the trigger loses the Discord marker.
-      if (process.env.DISCORD_REPLY_GUARD !== 'off' && isStopHookFeedback(e)) continue
+      // Skip all harness-injected entries: turnCompanion, isCompactSummary, stop hook
+      // feedback, bus frames, local-command XML entries. Same inversion as discordReplyState:
+      // stop ONLY on genuine human turns, never on harness noise.
+      if (isHarnessEntry(e)) continue
       if (isToolResult(content)) continue
-      // SKIP BUS FRAMES. Bot-to-bot traffic is not a trigger and not a terminator.
-      // Breaking here would hide Fernando's genuine message underneath.
-      if (isBusFrame(e)) continue
       triggerContent = textOf(content)
       break
     }
