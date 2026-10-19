@@ -1,3 +1,3 @@
 {"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">deploy ok?</channel>"}]}}
-{"type":"user","userType":"external","entrypoint":"sdk-cli","message":{"content":"<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>"}}
+{"type":"user","scheduledTaskId":"loop-placeholder","turnOrigin":"scheduled","userType":"external","entrypoint":"sdk-cli","message":{"content":"<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>"}}
 {"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"deploy is green"}]}}

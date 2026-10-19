@@ -4,56 +4,59 @@
 // ======================================
 // Every user entry is classified as exactly one of:
 //
-//   'harness'  — positively identified as harness-injected. Safe to skip in any context.
-//               Structural flags: turnCompanion, isCompactSummary, isVisibleInTranscriptOnly.
-//               Functional: isStopHookFeedback, isBusFrame.
-//               Content-structural: tool_result arrays (Claude Code tool call returns).
-//               Named injection tags (explicit list — NOT open-ended XML matching):
-//               slash-command: <command-message>, <command-name>
-//               local-command: <local-command-caveat>, <local-command-stdout>
-//               bash passthrough: <bash-input>, <bash-stdout>, <bash-stderr>
-//               task: <task-notification>
+//   'harness'  — identified as harness-injected. TWO TIERS of evidence:
+//
+//     structural  — a flag the harness sets that a human cannot replicate by typing:
+//                   turnCompanion, isCompactSummary, isVisibleInTranscriptOnly, isMeta
+//                   (for specific tags), promptSource (task-notification), scheduledTaskId
+//                   (command-message from /loop), tool_result arrays, bus-frame tag attrs.
+//
+//     textual     — tag matched only in content text; a human can paste the same bytes.
+//                   Examples: <bash-input>, <command-name>, <local-command-stdout>.
+//                   The census confirmed these tags appear in harness output. It does NOT
+//                   prove they cannot appear in human input. (Ohm's correction, 2026-10-19)
 //
 //   'human'    — positively identified as a genuine human turn.
-//               Discord channel message (has plugin source, not a bus frame).
-//               Plain-text terminal input (non-empty, does NOT open with an XML tag).
+//                Discord channel message (plugin source, not a bus frame).
+//                Plain-text terminal input (non-empty, no XML opener).
 //
 //   'unknown'  — cannot be classified. Has content, not in the harness list, not plain,
-//               not Discord. Example: <task>Analyze my private doc.</task>.
-//               ARBITRARY XML IS NOT PROOF OF HARNESS ORIGIN.
+//                not Discord. Example: <task>Analyze my private doc.</task>.
+//                ARBITRARY XML IS NOT PROOF OF HARNESS ORIGIN.
 //
-// Two consumers, two defaults:
-//   Guard:      may SKIP unknown — blocking is cheap, self-limiting, and loud.
-//   Forwarder:  must REFUSE on unknown — delivery crosses a boundary; wrong blocks are
-//               harmless, wrong forwards are not. An unknown between trigger and end
-//               means the forwarder cannot confirm what text belongs to the Discord turn.
+// TWO CONSUMERS, TWO DEFAULTS
+// ===========================
+//   Guard:      skips harness (both tiers) and unknown — blocking is cheap, self-limiting.
+//   Forwarder:  skips structural-harness only. Treats textual-harness as unknown and
+//               REFUSES to post. A text-only match cannot prove origin when delivery
+//               crosses a boundary: wrong blocks are harmless, wrong forwards are not.
 //
-// This asymmetry is the point. Do not collapse it back to two outcomes.
+// CONSEQUENCE: the forwarder fires less often than before. Turns where Fernando ran
+// a `!` bash command (<bash-input> is textual), invoked a slash command whose entries
+// have no structural flag (<command-name>, <local-command-stdout>), or typed any other
+// harness-looking text will not forward. This is the correct conservative behaviour.
+// In a normal turn the only entries between Fernando's message and the closing text are
+// tool_result arrays (structural), so the forwarder fires cleanly.
+//
+// See scripts/classify-census.cjs to verify distribution over a real transcript.
+// The census confirms COVERAGE (these tags appear in harness output). It does not
+// confirm EXCLUSIVITY (they cannot appear in human input).
+//
+// This asymmetry is the point. Do not collapse it back to two outcomes or one tier.
 
-// A blocking Stop hook's reason is appended by Claude Code as a `user` entry, so a
-// backward scan for the human turn finds IT and not the human. Captured on 2.1.303:
-//
-//   {"type":"user","message":{"role":"user","content":"Stop hook feedback:\n<reason>"},
-//    "isMeta":true,"userType":"external","entrypoint":"sdk-cli"}
-//
-// The match below is deliberately narrow: isMeta alone is NOT a discriminator — real
-// Discord channel entries also carry isMeta:true at runtime (verified session 34e5b924,
-// 2026-10-19; confirmed by Deet: 1513 entries in his own transcript carry isMeta
-// including Fernando's genuine messages). All three conditions are required.
+// Stop hook feedback — structural evidence: isMeta is set by the harness.
+// NOTE: isMeta alone is NOT a discriminator — real Discord channel entries also carry
+// isMeta:true at runtime (verified session 34e5b924, 2026-10-19). All three conditions
+// are required.
 function isStopHookFeedback(entry) {
   if (!entry || entry.isMeta !== true) return false;
   const content = entry.message?.content;
   return typeof content === 'string' && content.startsWith('Stop hook feedback:');
 }
 
-// A fleet-bus frame carries BOTH source="plugin:artifice-discord:artifice-discord" AND
-// source="fleet-bus" as ATTRIBUTES of the opening <channel> tag. It is noise to skip,
-// not a trigger and not a terminator: breaking on it blocks the scan from finding
-// Fernando's genuine message underneath.
-//
-// NOTE: we match within the tag attributes, not the full text. A raw text search would
-// misfire if Fernando quotes bus-frame attribute syntax in a Discord message. Matching
-// within the tag attributes only avoids that false positive.
+// Fleet-bus frames — structural evidence: both plugin source AND fleet-bus appear as
+// attributes in the opening <channel> tag. Matched within tag attributes to avoid
+// false positives from Fernando quoting bus-frame syntax in a message body.
 function isBusFrame(entry) {
   if (!entry || entry.type !== 'user') return false;
   const content = entry.message?.content;
@@ -63,90 +66,101 @@ function isBusFrame(entry) {
   return tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"') && tagAttrs.includes('source="fleet-bus"');
 }
 
-// Classify a user entry as 'harness', 'human', or 'unknown'.
-// See the module contract at the top of this file.
+// Classify a user entry and return the evidence tier that produced the classification.
+//
+// Returns: { class: 'harness'|'human'|'unknown', evidence: 'structural'|'textual' }
+//
+// The evidence field matters to the FORWARDER: structural-harness entries are safe to
+// skip; textual-harness entries are added to unknownEntries and treated like 'unknown'.
 function classifyEntry(entry) {
-  if (!entry || entry.type !== 'user') return 'unknown';
+  if (!entry || entry.type !== 'user') {
+    return { class: 'unknown', evidence: 'structural' };
+  }
 
-  // === POSITIVE HARNESS: structural flags ===
-  if (entry.turnCompanion) return 'harness';
-  if (entry.isCompactSummary) return 'harness';
-  if (entry.isVisibleInTranscriptOnly) return 'harness';
-  if (isStopHookFeedback(entry)) return 'harness';
-  if (isBusFrame(entry)) return 'harness';
+  // === STRUCTURAL HARNESS: flags the harness sets, not user-authored ===
+
+  if (entry.turnCompanion) return { class: 'harness', evidence: 'structural' };
+  if (entry.isCompactSummary) return { class: 'harness', evidence: 'structural' };
+  if (entry.isVisibleInTranscriptOnly) return { class: 'harness', evidence: 'structural' };
+  if (isStopHookFeedback(entry)) return { class: 'harness', evidence: 'structural' };
+  if (isBusFrame(entry)) return { class: 'harness', evidence: 'structural' };
 
   const content = entry.message?.content;
 
-  // === POSITIVE HARNESS: tool call results ===
-  // These are harness-internal — Claude Code injects a user entry for each tool_use result.
-  // They carry no human-authored text; classifying them as unknown would trigger the
-  // forwarder's boundary gate on ordinary tool-use turns.
+  // Tool call results — harness-internal, structural.
   if (Array.isArray(content) && content.length > 0 && content.every(c => c && c.type === 'tool_result')) {
-    return 'harness';
+    return { class: 'harness', evidence: 'structural' };
   }
 
   const text = typeof content === 'string' ? content
     : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
 
-  // === POSITIVE HARNESS: named injection tags (explicit list) ===
-  // Slash-command invocation tags. A /command entry opens with <command-message>
-  // (the command name without the slash), followed by <command-name> and <command-args>.
-  // Both tags must be in the list because either can appear first depending on Claude
-  // Code version.
-  if (text.startsWith('<command-message>')) return 'harness';
-  if (text.startsWith('<command-name>')) return 'harness';
-  // Local-command output tags:
-  if (text.startsWith('<local-command-caveat>')) return 'harness';
-  if (text.startsWith('<local-command-stdout>')) return 'harness';
-  // Bash passthrough tags (Claude Code injects these for `!` terminal commands):
-  if (text.startsWith('<bash-input>')) return 'harness';
-  if (text.startsWith('<bash-stdout>')) return 'harness';
-  if (text.startsWith('<bash-stderr>')) return 'harness';
-  // Task notification (Claude Code injects when a background agent completes):
-  if (text.startsWith('<task-notification>')) return 'harness';
+  // Named injection tags WITH structural backing:
+  //   <local-command-caveat>: runtime sets isMeta:true (not set on human terminal input)
+  if (text.startsWith('<local-command-caveat>') && entry.isMeta === true) {
+    return { class: 'harness', evidence: 'structural' };
+  }
+  //   <task-notification>: runtime sets promptSource === 'system'. Terminal-typed human
+  //   input has promptSource === 'typed' — never 'system'. Discord messages with
+  //   promptSource 'system' are caught above by the plugin-source check.
+  if (text.startsWith('<task-notification>') && entry.promptSource === 'system') {
+    return { class: 'harness', evidence: 'structural' };
+  }
+  //   <command-message> from /loop: runtime sets scheduledTaskId
+  if (text.startsWith('<command-message>') && entry.scheduledTaskId) {
+    return { class: 'harness', evidence: 'structural' };
+  }
 
-  if (!text.trim()) return 'unknown';
+  if (!text.trim()) return { class: 'unknown', evidence: 'structural' };
 
-  // === POSITIVE HUMAN: Discord channel message ===
-  // (bus frames already caught above; this is Fernando's genuine message)
-  if (text.includes('source="plugin:artifice-discord:artifice-discord"')) return 'human';
+  // === POSITIVE HUMAN ===
 
-  // === POSITIVE HUMAN: plain-text terminal input ===
-  // Does NOT open with an XML tag — we can confirm it's human-generated, not a
-  // harness or an ambiguous XML-wrapped task.
-  if (!/^<[a-z]/i.test(text.trimStart())) return 'human';
+  // Discord channel message (bus frames already caught above).
+  if (text.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    return { class: 'human', evidence: 'structural' };
+  }
+  // Plain-text terminal input — does not open with an XML tag.
+  if (!/^<[a-z]/i.test(text.trimStart())) {
+    return { class: 'human', evidence: 'structural' };
+  }
+
+  // === TEXTUAL HARNESS: tag matched in content, no structural backing ===
+  // Census confirms these tags appear in harness output.
+  // Does NOT prove they cannot appear in human input (Ohm's correction).
+  // Guard: skips these. Forwarder: adds to unknownEntries and refuses to post.
+  const TEXTUAL_HARNESS_TAGS = [
+    '<bash-input>', '<bash-stdout>', '<bash-stderr>',
+    '<command-name>', '<command-message>',
+    '<local-command-caveat>', '<local-command-stdout>',
+    '<task-notification>',
+  ];
+  for (const tag of TEXTUAL_HARNESS_TAGS) {
+    if (text.startsWith(tag)) return { class: 'harness', evidence: 'textual' };
+  }
 
   // === UNKNOWN ===
-  // Has text, not in the harness list, not plain, not Discord. Could be
-  // <task>Analyze my private doc; answer only here.</task> or any other
-  // XML-opened message from Fernando. We cannot classify — do not risk
-  // delivery boundary crossing.
-  return 'unknown';
+  // Has text, XML-opening, not in any harness list, not Discord, not plain text.
+  return { class: 'unknown', evidence: 'textual' };
 }
 
-// Convenience: true when the entry is positively identified as a genuine human turn.
-// Used in the guard's scan; exportable for callers that need a boolean.
+// Convenience wrappers — maintained for backward-compatible call sites.
 function isGenuineHumanTurn(entry) {
-  return classifyEntry(entry) === 'human';
+  return classifyEntry(entry).class === 'human';
 }
-
-// Convenience negation — keeps callers that read "skip harness" naturally.
-// isGenuineHumanTurn and classifyEntry are the authority; this is derived.
 function isHarnessEntry(entry) {
-  return classifyEntry(entry) === 'harness';
+  return classifyEntry(entry).class === 'harness';
 }
 
 // Shared turn identity, reply verdict, and boundary evidence for both Stop hooks.
 //
 // Returns:
-//   status      — 'discord_no_reply' | 'discord_replied' | 'not_discord'
-//   key         — `${sessionFile}:${triggerIdx}` (opaque, used for claim files)
-//   triggerIdx  — array index of the Discord trigger entry, or -1
-//   unknownEntries — indices of unknown user entries found between trigger and the
-//                    end of the transcript (i.e., after trigger in sequence, encountered
-//                    before trigger in the backward scan). The forwarder uses this to
-//                    refuse delivery when ANY unknown entry sits in that window.
-//                    Always an array; empty when there are none.
+//   status         — 'discord_no_reply' | 'discord_replied' | 'not_discord'
+//   key            — `${sessionFile}:${triggerIdx}` or null
+//   triggerIdx     — index of Discord trigger entry, or -1
+//   unknownEntries — indices of user entries in (triggerIdx, end] that are either
+//                    'unknown' class OR 'harness' with 'textual' evidence.
+//                    The guard ignores this field; the forwarder refuses when it is
+//                    non-empty (Ohm's delivery-boundary property).
 function discordReplyState(sessionFile, entries) {
   let lastDiscordIdx = -1;
   const unknownEntries = [];
@@ -155,24 +169,27 @@ function discordReplyState(sessionFile, entries) {
     const e = entries[i];
     if (e.type !== 'user') continue;
 
-    const cls = classifyEntry(e);
+    const { class: cls, evidence } = classifyEntry(e);
 
-    if (cls === 'harness') continue;
+    if (cls === 'harness') {
+      // Guard skips all harness. Forwarder must refuse on textual-harness —
+      // add to unknownEntries so the forwarder can apply its stricter rule.
+      if (evidence === 'textual') unknownEntries.push(i);
+      continue;
+    }
 
     if (cls === 'unknown') {
-      // Guard behavior: skip unknown (blocking is cheap and self-limiting).
-      // Track the index so the forwarder can apply its stricter rule.
       unknownEntries.push(i);
       continue;
     }
 
-    // cls === 'human' — this is the most recent genuine human turn. Stop here.
-    const content = e.message?.content;
-    const text = Array.isArray(content)
-      ? content.filter(c => c.type === 'text').map(c => c.text).join('')
-      : (typeof content === 'string' ? content : '');
+    // cls === 'human' — most recent genuine human turn. Stop here.
+    const c = e.message?.content;
+    const t = Array.isArray(c)
+      ? c.filter(x => x.type === 'text').map(x => x.text).join('')
+      : (typeof c === 'string' ? c : '');
 
-    if (text.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    if (t.includes('source="plugin:artifice-discord:artifice-discord"')) {
       lastDiscordIdx = i;
     }
     break;
@@ -186,12 +203,9 @@ function discordReplyState(sessionFile, entries) {
   for (let i = lastDiscordIdx + 1; i < entries.length; i++) {
     const e = entries[i];
     if (e.type !== 'assistant') continue;
-    const content = e.message?.content;
-    if (!Array.isArray(content)) continue;
-    const hasReply = content.some(
-      c => c.type === 'tool_use' && c.name && c.name.includes('discord') && c.name.includes('reply')
-    );
-    if (hasReply) {
+    const c = e.message?.content;
+    if (!Array.isArray(c)) continue;
+    if (c.some(x => x.type === 'tool_use' && x.name && x.name.includes('discord') && x.name.includes('reply'))) {
       return { status: 'discord_replied', key, triggerIdx: lastDiscordIdx, unknownEntries };
     }
   }

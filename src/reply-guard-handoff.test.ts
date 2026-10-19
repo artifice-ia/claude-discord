@@ -318,14 +318,23 @@ test('compact-only transcript: guard does not block, forwarder does not post', (
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
 })
 
-// Full retry cycle: guard blocks on first Stop, forwarder posts on retry Stop.
-test('Discord+compact: guard blocks then forwarder posts on retry', () => {
+// Compact retry: guard blocks; forwarder REFUSES on retry (textual harness in window).
+//
+// The /compact command sequence injects <command-name> and <local-command-stdout> entries.
+// These have no structural backing — <command-name> carries only entrypoint/isSidechain/
+// userType, the same fields any human terminal entry would have. The forwarder cannot
+// distinguish a real /compact injection from Fernando typing <command-name>…</command-name>
+// to pivot the forwarder's scan. textual-harness → unknownEntries → forwarder refuses.
+//
+// The guard is unaffected: it skips textual-harness the same as structural-harness.
+// Fernando still gets a block; the forwarder just doesn't post the post-compact answer
+// on retry. This is the correct conservative behaviour ("fire less often").
+test('Discord+compact: guard blocks; forwarder refuses on retry (textual harness in window)', () => {
   loadFixture('discord-then-compact')
   const first = { transcript_path: session, stop_hook_active: false }
   expect(JSON.parse(run(guard, first).stdout).decision).toBe('block')
   loadFixture('retry-discord-then-compact')
-  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
-    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
 })
 
 // TEST 6 — Unknown future harness entry: guard must still block.
@@ -379,46 +388,73 @@ test('Ohm canary: guard-off forwarder refuses when unknown entry sits before tri
   expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })
 
-// TEST 9 — bash-input harness tags: forwarder still posts (not blocked by boundary gate).
+// TEST 9 — bash-input entries: guard still blocks; forwarder REFUSES (textual harness).
 //
-// <bash-input>/<bash-stdout>/<bash-stderr> entries appear when Fernando runs `!` bash
-// commands during a Discord-triggered turn. Previous commits would have classified them
-// as 'unknown' (XML opener, not in the named list) and silently disabled the forwarder
-// for most turns. They are documented Claude Code injections — added to the named
-// harness list in this commit. The forwarder must still post across them.
+// <bash-input>/<bash-stdout>/<bash-stderr> entries have no structural backing —
+// they carry only entrypoint/isSidechain/userType, the same fields a human terminal
+// entry would have. classifyEntry returns textual-harness → unknownEntries → forwarder
+// refuses. This is CORRECT: if Fernando ran `!` bash commands during a Discord-triggered
+// turn, the leaked text may include bash output Fernando didn't intend for Discord.
 //
-// Fixture: real bash-input structure (bash-input/stdout/stderr as a single entry;
-// structurally accurate, content sanitized — no credentials).
-test('bash passthrough entries in window: forwarder still posts (guard-off)', () => {
+// The guard still blocks (it skips textual-harness the same as structural-harness).
+test('bash passthrough entries in window: guard blocks, forwarder refuses (textual harness)', () => {
   loadFixture('discord-then-bash-input')
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
-  expect(run(forward, { transcript_path: session }, true).requests)
-    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })
 
-// TEST 10 — task-notification harness tag: forwarder still posts (not blocked).
+// TEST 10 — task-notification with structural backing: forwarder still posts.
 //
-// <task-notification> entries appear when a background agent finishes. Same failure mode
-// as bash-input: previously 'unknown', would disable the forwarder on most agent turns.
-// Added to named harness list. Fixture from Kat's real transcript (session 34e5b924,
-// entry 1144 — IDs and content sanitized, structure preserved).
-test('task-notification entry in window: forwarder still posts (guard-off)', () => {
+// <task-notification> from Claude Code carries promptSource (structural flag).
+// classifyEntry returns structural-harness → not in unknownEntries → forwarder posts.
+// Fixture updated to include promptSource (from real transcript, session 34e5b924).
+test('task-notification with promptSource: forwarder still posts (structural harness)', () => {
   loadFixture('discord-then-task-notification')
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, { transcript_path: session }, true).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
 
-// TEST 11 — command-message harness tag: forwarder still posts.
+// TEST 11 — command-message with structural backing: forwarder still posts.
 //
-// A slash-command invocation entry opens with <command-message> (the command name
-// without the slash), not <command-name>. The named list had <command-name> but
-// missed <command-message> — census showed 1 unknown in Deet's transcript from
-// a /loop invocation. Fixture from Kat's real transcript (session 239e14bd,
-// entry 3391 — IDs sanitized; structure: command-message / command-name / command-args).
-test('command-message slash-command entry in window: forwarder still posts (guard-off)', () => {
+// <command-message> from /loop carries scheduledTaskId (structural flag).
+// classifyEntry returns structural-harness → not in unknownEntries → forwarder posts.
+// Fixture updated to include scheduledTaskId (from real transcript, session 239e14bd).
+test('command-message with scheduledTaskId: forwarder still posts (structural harness)', () => {
   loadFixture('discord-then-command-message')
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
   expect(run(forward, { transcript_path: session }, true).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})
+
+// TESTS 12-14 — Ohm's three canary cases (Ohm's P1 on PR #53 review).
+//
+// A human can paste harness-looking text to trick the forwarder into treating their
+// private terminal answer as a Discord continuation. Verified by Ohm with the Node
+// forwarder, HTTPS recorder, and DISCORD_REPLY_GUARD=off. Canary captured in POST body.
+//
+// Three cases, one for each tag family that has NO structural backing:
+//   12. <bash-stdout>private data</bash-stdout>\nanalyze privately
+//   13. <task-notification> without promptSource
+//   14. <command-message> without scheduledTaskId
+//
+// classifyEntry → textual-harness → unknownEntries → forwarder refuses. ✓
+//
+// Mutation record: making the forwarder accept textual evidence (treat textual-harness
+// as structural-harness, skip it instead of gating) causes all three to fail — each
+// posts its CANARY-*-LEAK to Discord when it should not.
+test('Ohm canary (bash-stdout, no structural): guard blocks, forwarder refuses (guard-off)', () => {
+  loadFixture('canary-textual-bash')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
+})
+test('Ohm canary (task-notification, no promptSource): guard blocks, forwarder refuses (guard-off)', () => {
+  loadFixture('canary-textual-task')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
+})
+test('Ohm canary (command-message, no scheduledTaskId): guard blocks, forwarder refuses (guard-off)', () => {
+  loadFixture('canary-textual-command')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests).toEqual([])
 })

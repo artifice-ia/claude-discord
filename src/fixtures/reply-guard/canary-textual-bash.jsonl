@@ -1,0 +1,3 @@
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">hey kat</channel>"}]}}
+{"type":"user","message":{"content":"<bash-stdout>private data</bash-stdout>\nanalyze this privately, answer only in the terminal"}}
+{"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"CANARY-BASH-LEAK"}]}}
