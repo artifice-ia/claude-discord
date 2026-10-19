@@ -408,3 +408,17 @@ test('task-notification entry in window: forwarder still posts (guard-off)', () 
   expect(run(forward, { transcript_path: session }, true).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
+
+// TEST 11 — command-message harness tag: forwarder still posts.
+//
+// A slash-command invocation entry opens with <command-message> (the command name
+// without the slash), not <command-name>. The named list had <command-name> but
+// missed <command-message> — census showed 1 unknown in Deet's transcript from
+// a /loop invocation. Fixture from Kat's real transcript (session 239e14bd,
+// entry 3391 — IDs sanitized; structure: command-message / command-name / command-args).
+test('command-message slash-command entry in window: forwarder still posts (guard-off)', () => {
+  loadFixture('discord-then-command-message')
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  expect(run(forward, { transcript_path: session }, true).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})

@@ -9,7 +9,8 @@
 //               Functional: isStopHookFeedback, isBusFrame.
 //               Content-structural: tool_result arrays (Claude Code tool call returns).
 //               Named injection tags (explicit list — NOT open-ended XML matching):
-//               local-command: <local-command-caveat>, <command-name>, <local-command-stdout>
+//               slash-command: <command-message>, <command-name>
+//               local-command: <local-command-caveat>, <local-command-stdout>
 //               bash passthrough: <bash-input>, <bash-stdout>, <bash-stderr>
 //               task: <task-notification>
 //
@@ -88,9 +89,14 @@ function classifyEntry(entry) {
     : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
 
   // === POSITIVE HARNESS: named injection tags (explicit list) ===
-  // Local-command tags (Claude Code injects these when the user runs a /command):
-  if (text.startsWith('<local-command-caveat>')) return 'harness';
+  // Slash-command invocation tags. A /command entry opens with <command-message>
+  // (the command name without the slash), followed by <command-name> and <command-args>.
+  // Both tags must be in the list because either can appear first depending on Claude
+  // Code version.
+  if (text.startsWith('<command-message>')) return 'harness';
   if (text.startsWith('<command-name>')) return 'harness';
+  // Local-command output tags:
+  if (text.startsWith('<local-command-caveat>')) return 'harness';
   if (text.startsWith('<local-command-stdout>')) return 'harness';
   // Bash passthrough tags (Claude Code injects these for `!` terminal commands):
   if (text.startsWith('<bash-input>')) return 'harness';
