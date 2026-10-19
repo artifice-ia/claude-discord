@@ -16,7 +16,7 @@ const { createHash } = require('crypto')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
-const { discordReplyState, isStopHookFeedback, isBusFrame } = require('./discord-reply-state')
+const { discordReplyState } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -177,58 +177,37 @@ process.stdin.on('end', async () => {
   } catch { process.exit(0) }
   if (entries.length === 0) process.exit(0)
 
-  // Walk backwards to find the most recent assistant entry that is EITHER a
-  // text block or a reply call — whichever the turn ended on. Text blocks only
-  // ever reach the terminal; the reply tool is the only path to Discord. So:
-  //   - turn ended on text  → it leaked, forward it
-  //   - turn ended on reply → covered, do nothing
-  // Earlier text (pre-reply preamble, mid-turn narration) is intentionally
-  // ignored — only the closing statement matters. This catches trailing text
-  // emitted AFTER a reply when the guard is disabled. With the guard enabled,
-  // any reply in this turn covers it and suppresses the fallback below.
-  let leakedText = ''
-  let decided = false
-  let triggerContent = null
-
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i]
-    const content = e.message && e.message.content
-    if (e.type === 'assistant' && !decided) {
-      if (hasReplyCall(content)) {
-        decided = true // ended on (or covered by) a reply — nothing leaked
-      } else {
-        const t = textOf(content)
-        if (t) { leakedText = t; decided = true }
-        // thinking / tool_use(Bash) entries carry no text — keep walking
-      }
-    } else if (e.type === 'user') {
-      if (process.env.DISCORD_REPLY_GUARD !== 'off' && e.turnCompanion) continue
-      // Same reason as the shared scan: on a retry Stop this entry is the hook's own
-      // feedback, and treating it as the trigger loses the Discord marker.
-      if (process.env.DISCORD_REPLY_GUARD !== 'off' && isStopHookFeedback(e)) continue
-      if (isToolResult(content)) continue
-      // SKIP BUS FRAMES. Bot-to-bot traffic is not a trigger and not a terminator.
-      // Breaking here would hide Fernando's genuine message underneath.
-      if (isBusFrame(e)) continue
-      triggerContent = textOf(content)
-      break
-    }
-  }
-
-  if (!leakedText) process.exit(0)
-  if (!triggerContent || !triggerContent.includes(DISCORD_SOURCE)) process.exit(0)
-
-  // Sanitize before forwarding: drop any echoed prompt-scaffolding tags
-  // (Claude Code's `<system-reminder>` and this plugin's `<channel>` wrapper).
-  // If nothing meaningful remains, don't forward the noise.
-  leakedText = stripPromptScaffolding(leakedText)
-  if (!leakedText) process.exit(0)
-
+  // Get turn identity, reply verdict, and boundary evidence from the shared function.
+  // Called BEFORE the leaked-text scan so the forwarder never re-derives the trigger
+  // independently — a second derivation is how three defects in #49 each needed fixing
+  // in two places.
+  //
+  // unknownEntries: indices of unknown user entries (classifyEntry === 'unknown') that
+  // sit between the Discord trigger and the end of the transcript. An unknown entry
+  // means the code cannot confirm what text belongs to the Discord turn; any unknown
+  // in that window makes forwarding unsafe — wrong blocks are harmless, wrong forwards
+  // cross a delivery boundary and put private terminal content in a Discord channel.
   persona = {}
   try { persona = readFrontmatter(readFileSync(personaPath, 'utf8')) } catch {}
+
+  const { status, key, triggerIdx, unknownEntries } = discordReplyState(transcriptPath, entries)
+
+  if (triggerIdx === -1) process.exit(0)
+
+  // Unknown-boundary gate (FORWARDER only — stricter than the guard).
+  // The guard may skip unknown entries; the forwarder must refuse.
+  // Log the refusal: a silent gate is indistinguishable from the feature being broken.
+  if (unknownEntries.length > 0) {
+    console.error(`[discord-stop-forward] refusing to forward: ${unknownEntries.length} unknown ${unknownEntries.length === 1 ? 'entry' : 'entries'} in window (indices: ${unknownEntries.join(', ')})`)
+    process.exit(0)
+  }
+
+  const triggerEntry = entries[triggerIdx]
+  const triggerContent = textOf(triggerEntry && triggerEntry.message && triggerEntry.message.content)
+  if (!triggerContent.includes(DISCORD_SOURCE)) process.exit(0)
+
   let fallbackKey = null
   if (process.env.DISCORD_REPLY_GUARD !== 'off') {
-    const { status, key } = discordReplyState(transcriptPath, entries)
     if (status !== 'discord_no_reply') process.exit(0)
     let prior = null
     try {
@@ -238,6 +217,38 @@ process.stdin.on('end', async () => {
     if (prior !== key) process.exit(0)
     fallbackKey = key
   }
+
+  // Scan backward from end to just after the trigger to find the most recent
+  // assistant text or reply call in that window.
+  //   - turn ended on text  → it leaked, forward it
+  //   - turn ended on reply → covered, do nothing
+  // Scanning only within the post-trigger window prevents accidentally grabbing
+  // text from a prior Discord turn further back in the transcript.
+  let leakedText = ''
+  let decided = false
+
+  for (let i = entries.length - 1; i > triggerIdx; i--) {
+    const e = entries[i]
+    const content = e.message && e.message.content
+    if (e.type !== 'assistant') continue
+    if (!decided) {
+      if (hasReplyCall(content)) {
+        decided = true
+      } else {
+        const t = textOf(content)
+        if (t) { leakedText = t; decided = true }
+      }
+    }
+  }
+
+  if (!leakedText) process.exit(0)
+
+  // Sanitize before forwarding: drop any echoed prompt-scaffolding tags
+  // (Claude Code's `<system-reminder>` and this plugin's `<channel>` wrapper).
+  // If nothing meaningful remains, don't forward the noise.
+  leakedText = stripPromptScaffolding(leakedText)
+  if (!leakedText) process.exit(0)
+
   const chatMatch = triggerContent.match(/chat_id="(\d+)"/)
   // Always forward to the persona's configured channel, not the trigger
   // channel — trigger may be a fan-out channel.

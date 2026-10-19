@@ -1,0 +1,2 @@
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\">urgent question from Fernando</channel>"}]},"origin":{"kind":"channel","server":"plugin:artifice-discord:artifice-discord"}}
+{"type":"user","message":{"content":"<future-harness-thing>whatever</future-harness-thing>"}}

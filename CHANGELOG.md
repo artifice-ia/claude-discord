@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.11.0
+
+Five security reviews (Ohm, three rounds; Deet, two), five real leaks reproduced in
+canaries and closed. What shipped is substantially more than the compaction-entry fix
+that opened this branch. Accurate record:
+
+### Security: three leaks reproduced and closed
+
+**Leak 1 — Named-tag terminal paste** (Ohm's P1 on 1260439):
+The backward scan inferred harness provenance from XML tag names alone
+(`<bash-stdout>`, `<command-name>`, etc.). A human can paste those same bytes in the
+terminal. A `discordReplyState` scan that skipped them would see no intervening entry,
+find the Discord trigger, and the forwarder would POST the pasted content to Discord.
+
+**Leak 2 — Pasted bus-frame wrapper** (Ohm's P1 on e60a86f):
+`isBusFrame` inspected tag attributes in message text only. A human pasting
+`<channel source="plugin:artifice-discord..." source="fleet-bus">private</channel>`
+caused `classifyEntry` to return `{ class:'harness', evidence:'structural' }`.
+`unknownEntries` was empty, and the forwarder POSTed the canary.
+
+**Leak 3 — Text-fallback trigger** (Deet's flag on 5c3fec2):
+`discordReplyState` tested provenance a second time in the scan:
+`if (e.origin?.kind === 'channel' || t.includes('source="plugin:artifice-discord..."'))`.
+A terminal entry with `origin.kind='human'` (proven non-Discord by the runtime)
+became the Discord trigger when its text contained the plugin source string. The forwarder
+posted `CANARY-AFTER-REAL-LEAK` in the regression canary.
+
+### Fix: three-outcome classifier, two tiers of evidence, origin-first provenance
+
+`classifyEntry(entry)` now returns `{ class, evidence, channel? }`:
+
+- **`class`**: `'harness'` | `'human'` | `'unknown'`. One classification per entry; never
+  re-derived.
+- **`evidence`**: `'structural'` (runtime field the harness sets, unforgeable by typing) |
+  `'textual'` (tag matched in content text; a human could paste the same bytes).
+- **`channel: 'discord'`**: present only when provenance is proven and the entry is a
+  Discord channel message (not fleet-bus). Absent on terminal turns, regardless of text.
+
+`origin.kind` is set by the Claude Code runtime, not user-authored text. All text
+inspection of channel content runs as a sub-discriminator **inside** the
+`origin.kind === 'channel'` branch only.
+
+Consumers treat the two evidence tiers differently:
+- **Guard**: triggers on `discord_no_reply`. Skips structural-harness. Blocks on
+  textual-harness, unknown, and non-Discord human entries (all → `unknownEntries`).
+- **Forwarder**: refuses delivery when `unknownEntries` is non-empty. This closes all
+  three leaks: the forwarder refuses unless every entry in the scan window has proven,
+  structural, non-Discord provenance.
+
+### Documented behavior change: terminal turns no longer terminate the scan
+
+Previously, a non-Discord human entry terminated the backward scan (`break`), returning
+`not_discord`. Now it adds to `unknownEntries` and the scan continues looking for an
+older unanswered Discord message.
+
+Trade: the guard can now block on a Discord message older than the most recent human
+turn. No leak occurs — the terminal entry is in `unknownEntries`, so the forwarder
+withholds delivery. Test 7 renamed and updated to document this explicitly. The module
+header carries a full written justification.
+
+### Tests
+
+183/183 pass. New tests:
+- Ohm's three canaries (bash-stdout paste, task-notification, command-message) — all
+  refuse delivery.
+- Pasted bus-frame wrapper without `origin` — guard blocks, forwarder refuses.
+- Deet's probe: entry with `origin.kind='human'` and plugin source text, alone — guard
+  returns `not_discord`; mutation restoring the `||` fallback causes this test to fail.
+- Same paste after a real Discord message — Discord is trigger, forwarder refuses
+  (paste in `unknownEntries`).
+- Old-transcript Discord entry (no `origin`) — guard blocks, forwarder refuses (textual
+  trigger lands in `unknownEntries`).
+
+Fixtures from real transcript entries (34e5b924, 239e14bd).
+Census (`scripts/classify-census.cjs`): unknown = 0 on both transcripts; header updated
+to clarify PROVES coverage, NOT exclusivity.
+
+### Other
+
+- `discord-stop-guard.js` block message updated: now states explicitly that the forwarder
+  may also refuse to deliver closing text, so the model does not assume the fallback
+  covers silence.
+
 ## 0.10.4
 
 - **New hook `discord-loop-tick.js` (PostToolUse).** When the model calls

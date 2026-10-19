@@ -1,0 +1,2 @@
+{"type":"user","message":{"content":"<channel source=\"plugin:artifice-discord:artifice-discord\" chat_id=\"123\" user=\"fernando\">old transcript message</channel>"}}
+{"type":"assistant","message":{"usage":{"input_tokens":100},"content":[{"type":"text","text":"old reply text"}]}}
