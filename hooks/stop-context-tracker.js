@@ -249,7 +249,9 @@ process.stdin.on('end', async () => {
           reason:
             'A Discord message is unanswered: you have not called the reply tool this turn. ' +
             'Writing the reply as ordinary response text does NOT send it -- the sender sees ' +
-            'silence. Call the Discord reply tool with the chat_id and your text now, then finish.'
+            'silence. If you do not call the reply tool before finishing, the forwarder may also ' +
+            'refuse to deliver your closing text. Call the Discord reply tool with the chat_id ' +
+            'and your text now, then finish.'
         }));
         process.exit(0);
         return;
