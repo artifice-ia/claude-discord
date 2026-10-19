@@ -16,7 +16,7 @@ const { createHash } = require('crypto')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
-const { discordReplyState, isStopHookFeedback } = require('./discord-reply-state')
+const { discordReplyState, isStopHookFeedback, isBusFrame } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -24,7 +24,6 @@ const tokenFile = join(claudeDir, 'discord-token')
 
 const REPLY_TOOL = 'mcp__plugin_artifice-discord_artifice-discord__reply'
 const DISCORD_SOURCE = 'source="plugin:artifice-discord:artifice-discord"'
-const BUS_SOURCE = 'source="fleet-bus"'
 
 function readFrontmatter(content) {
   const match = content.match(/^---\n([\s\S]*?)\n---/)
@@ -208,15 +207,16 @@ process.stdin.on('end', async () => {
       // feedback, and treating it as the trigger loses the Discord marker.
       if (process.env.DISCORD_REPLY_GUARD !== 'off' && isStopHookFeedback(e)) continue
       if (isToolResult(content)) continue
+      // SKIP BUS FRAMES. Bot-to-bot traffic is not a trigger and not a terminator.
+      // Breaking here would hide Fernando's genuine message underneath.
+      if (isBusFrame(e)) continue
       triggerContent = textOf(content)
       break
     }
   }
 
   if (!leakedText) process.exit(0)
-  // A fleet-bus frame carries BOTH the plugin source and source="fleet-bus".
-  // Bot-to-bot traffic must not trigger forwarding to Fernando's channel.
-  if (!triggerContent || !triggerContent.includes(DISCORD_SOURCE) || triggerContent.includes(BUS_SOURCE)) process.exit(0)
+  if (!triggerContent || !triggerContent.includes(DISCORD_SOURCE)) process.exit(0)
 
   // Sanitize before forwarding: drop any echoed prompt-scaffolding tags
   // (Claude Code's `<system-reminder>` and this plugin's `<channel>` wrapper).

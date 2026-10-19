@@ -13,6 +13,27 @@ function isStopHookFeedback(entry) {
   return typeof content === 'string' && content.startsWith('Stop hook feedback:');
 }
 
+// A fleet-bus frame carries BOTH source="plugin:artifice-discord:artifice-discord" AND
+// source="fleet-bus" as ATTRIBUTES of the opening <channel> tag. It is noise to skip,
+// not a trigger and not a terminator: breaking on it blocks the scan from finding
+// Fernando's genuine message underneath.
+//
+// NOTE: we match the opening <channel> tag's attribute string, not the full text.
+// A raw text search would misfire if Fernando quotes bus-frame attribute syntax in a
+// Discord message — "<channel ...fleet-bus...>his words</channel>" includes both strings.
+// Matching within the tag attributes only avoids that false skip.
+//
+// NOTE: turnOrigin === 'peer' is NOT a discriminator. All channel-injected entries carry
+// it, including Fernando's own Discord messages. The attribute check is the correct signal.
+function isBusFrame(entry) {
+  if (!entry || entry.type !== 'user') return false;
+  const content = entry.message?.content;
+  const text = typeof content === 'string' ? content
+    : (Array.isArray(content) ? content.filter(c => c.type === 'text').map(c => c.text).join('') : '');
+  const tagAttrs = text.match(/<channel\s([^>]*)>/)?.[1] ?? '';
+  return tagAttrs.includes('source="plugin:artifice-discord:artifice-discord"') && tagAttrs.includes('source="fleet-bus"');
+}
+
 // Shared turn identity and reply verdict for both Stop hooks.
 // Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
 function discordReplyState(sessionFile, entries) {
@@ -38,6 +59,11 @@ function discordReplyState(sessionFile, entries) {
     // fallback that this whole handoff exists to preserve never fires.
     if (isStopHookFeedback(e)) continue;
 
+    // SKIP BUS FRAMES. A fleet-bus frame is not a trigger and not a terminator — it is
+    // bot-to-bot traffic injected after Fernando's message. Breaking here would hide his
+    // genuine turn underneath.
+    if (isBusFrame(e)) continue;
+
     const content = e.message?.content;
     if (!content) continue;
 
@@ -47,9 +73,7 @@ function discordReplyState(sessionFile, entries) {
       ? content.filter(c => c.type === 'text').map(c => c.text).join('')
       : (typeof content === 'string' ? content : '');
 
-    // A fleet-bus frame carries BOTH the plugin source attribute and source="fleet-bus".
-    // Bot-to-bot traffic must not be mistaken for a human Discord trigger.
-    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"') && !textParts.includes('source="fleet-bus"')) {
+    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
       lastDiscordIdx = i;
       break;
     } else {
@@ -74,4 +98,4 @@ function discordReplyState(sessionFile, entries) {
   return { status: 'discord_no_reply', key };
 }
 
-module.exports = { discordReplyState, isStopHookFeedback };
+module.exports = { discordReplyState, isStopHookFeedback, isBusFrame };

@@ -220,32 +220,47 @@ test('a claim left by an earlier turn does not suppress a different turn', () =>
 })
 
 // BUS-FRAME EXCLUSION. A fleet-bus frame carries BOTH source="plugin:artifice-discord:..."
-// AND source="fleet-bus". Both trigger scans previously matched on the plugin-source alone,
-// so every inbound bus message counted as an unanswered Discord message from Fernando:
-// the guard blocked the turn, and the forwarder leaked internal reasoning to his channel.
-// The fix: a Discord trigger must carry the plugin source AND NOT carry the fleet-bus source.
-// Fixture carries the real frame opening from a live bus exchange on 2026-10-18.
+// AND source="fleet-bus". Both trigger scans must skip it with `continue`, not `break`.
+// Breaking on it stops the scan at the bus frame: the verdict is not_discord, the guard
+// does not block, and the forwarder does not forward — Fernando gets silence on every
+// turn where a bus frame lands after his message, which is nearly always.
+// Fixtures carry the real frame opening from a live bus exchange on 2026-10-18.
 
-test('bus frame: guard never blocks (not_discord verdict)', () => {
+test('bus-only transcript: guard does not block and forwarder does not post', () => {
   loadFixture('bus-frame')
-  // First pass: guard must not block — bus traffic is not Fernando
   expect(run(guard).stdout).toBe('')
-})
-
-test('bus frame: forwarder never posts (no trigger on retry)', () => {
-  loadFixture('bus-frame')
-  // Even with stop_hook_active — must not POST to Fernando's channel
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
 })
 
-// Positive control: with the bus-frame exclusion in place, a genuine Discord frame
-// still blocks on first pass and still forwards on retry. The exclusion must not be
-// over-broad.
+// THE TEST THAT DISTINGUISHES CONTINUE FROM BREAK. A transcript with Fernando's genuine
+// Discord message, then assistant prose, then a bus frame appended last. Under `break`
+// the scan stops at the bus frame, judges not_discord, and the guard never fires —
+// Fernando gets silence. Under `continue` the scan skips the bus frame and finds his
+// message underneath, the guard blocks, and the forwarder posts on retry.
+test('Discord+bus: guard blocks on Fernando message, forwarder posts on retry', () => {
+  loadFixture('discord-then-bus')
+  const first = { transcript_path: session, stop_hook_active: false }
+  expect(JSON.parse(run(guard, first).stdout).decision).toBe('block')
+  loadFixture('retry-discord-then-bus')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})
+
+// Guard must NOT block when Fernando's Discord message was already answered and a bus
+// frame arrived after, ending the turn. Bus frame is the newest user entry; without
+// the continue skip the guard would treat it as the trigger, find no reply after it,
+// and block — producing a false forward on a turn Fernando already got a reply for.
+test('Discord answered then bus frame: guard never blocks, forwarder never posts', () => {
+  loadFixture('replied-then-bus')
+  expect(run(guard).stdout).toBe('')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+// Positive control: genuine Discord frame (no bus frame) still blocks and forwards.
+// The skip must not be over-broad.
 test('genuine Discord frame still blocks and forwards (exclusion is not over-broad)', () => {
   loadFixture('unanswered')
-  // First pass blocks
   expect(JSON.parse(run(guard).stdout).decision).toBe('block')
-  // Retry forwards
   loadFixture('retry-unanswered')
   expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
