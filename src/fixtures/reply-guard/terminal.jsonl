@@ -1,0 +1,2 @@
+{"type": "user", "message": {"content": [{"type": "text", "text": "typed in terminal"}]}}
+{"type": "assistant", "message": {"usage": {"input_tokens": 100}, "content": [{"type": "text", "text": "answer"}]}}

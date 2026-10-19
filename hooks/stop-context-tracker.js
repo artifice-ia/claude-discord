@@ -91,6 +91,10 @@ const CTX_TXT = `/tmp/${BOT_NAME}-ctx.txt`;
 const MEM_FLAG = `/tmp/${BOT_NAME}-memory-save.flag`;
 const DISCORD_SENT_FLAG = `/tmp/${BOT_NAME}-memory-discord-sent.flag`;
 const MISSED_REPLY_FLAG = `/tmp/${BOT_NAME}-missed-discord-reply.flag`;
+// Which message the last block was for, so an unsendable reply cannot trap the turn.
+const REPLY_GUARD_MARKER = `/tmp/${BOT_NAME}-reply-guard-blocked.json`;
+const REPLY_GUARD_DISABLED = process.env.DISCORD_REPLY_GUARD === 'off';
+const { discordReplyState } = require('./discord-reply-state');
 
 function findRecentSession() {
   const projectsDir = path.join(claudeDir, 'projects');
@@ -131,6 +135,7 @@ function parseSession(filePath) {
     if (!line.trim()) continue;
     let entry;
     try { entry = JSON.parse(line); } catch { continue; }
+    if (!entry) continue;
     entries.push(entry);
     if (entry.type !== 'assistant' || !entry.message?.usage) continue;
     const u = entry.message.usage;
@@ -141,46 +146,6 @@ function parseSession(filePath) {
   }
 
   return { lastInputTokens, lastModel, totalOutputTokens, turns, entries };
-}
-
-// Returns: 'discord_no_reply' | 'discord_replied' | 'not_discord'
-function checkDiscordReply(entries) {
-  let lastDiscordIdx = -1;
-
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e.type !== 'user') continue;
-    const content = e.message?.content;
-    if (!content) continue;
-
-    if (Array.isArray(content) && content.every(c => c.type === 'tool_result')) continue;
-
-    const textParts = Array.isArray(content)
-      ? content.filter(c => c.type === 'text').map(c => c.text).join('')
-      : (typeof content === 'string' ? content : '');
-
-    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
-      lastDiscordIdx = i;
-      break;
-    } else {
-      break;
-    }
-  }
-
-  if (lastDiscordIdx === -1) return 'not_discord';
-
-  for (let i = lastDiscordIdx + 1; i < entries.length; i++) {
-    const e = entries[i];
-    if (e.type !== 'assistant') continue;
-    const content = e.message?.content;
-    if (!Array.isArray(content)) continue;
-    const hasReply = content.some(
-      c => c.type === 'tool_use' && c.name && c.name.includes('discord') && c.name.includes('reply')
-    );
-    if (hasReply) return 'discord_replied';
-  }
-
-  return 'discord_no_reply';
 }
 
 // Returns HTTP status code, or null on network error/timeout.
@@ -212,11 +177,15 @@ let input = '';
 process.stdin.resume();
 process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', async () => {
-  const sessionFile = findRecentSession();
+  let payload = {};
+  try { payload = JSON.parse(input); } catch {}
+  const transcriptPath = payload?.transcript_path;
+  // Legacy fallback is for context telemetry only; it must never authorize a block.
+  const sessionFile = transcriptPath || findRecentSession();
   if (!sessionFile) { process.exit(0); return; }
 
   const parsed = parseSession(sessionFile);
-  if (!parsed || parsed.turns === 0) { process.exit(0); return; }
+  if (!parsed) { process.exit(0); return; }
 
   const { lastInputTokens, lastModel, totalOutputTokens, turns, entries } = parsed;
   const contextLimit = windowForModel(lastModel);
@@ -255,11 +224,40 @@ process.stdin.on('end', async () => {
   }
 
   // Discord reply check
-  const replyStatus = checkDiscordReply(entries);
+  const { status: replyStatus, key } = discordReplyState(sessionFile, entries);
   if (replyStatus === 'discord_no_reply') {
     try { fs.writeFileSync(MISSED_REPLY_FLAG, JSON.stringify({ ts: Date.now() })); } catch {}
+
+    // REFUSE TO END THE TURN. This check has been correct since it was written and did
+    // nothing, because the only thing it did was write a flag no code reads. A verdict
+    // with no consequence is indistinguishable from no check at all.
+    //
+    // Writing the answer as assistant text does not send it: the human sees silence, and
+    // the model does not notice, because the turn feels finished once the content exists.
+    //
+    // Self-limiting: once the reply is sent, the next Stop sees it and passes.
+    if (!REPLY_GUARD_DISABLED && transcriptPath) {
+      let prior = null;
+      try { prior = JSON.parse(fs.readFileSync(REPLY_GUARD_MARKER, 'utf8')).key; } catch {}
+
+      // Block ONCE per unanswered message. If sending is genuinely broken, refusing
+      // forever hides the real failure behind a loop.
+      if (prior !== key) {
+        try { fs.writeFileSync(REPLY_GUARD_MARKER, JSON.stringify({ key, ts: Date.now() })); } catch {}
+        process.stdout.write(JSON.stringify({
+          decision: 'block',
+          reason:
+            'A Discord message is unanswered: you have not called the reply tool this turn. ' +
+            'Writing the reply as ordinary response text does NOT send it -- the sender sees ' +
+            'silence. Call the Discord reply tool with the chat_id and your text now, then finish.'
+        }));
+        process.exit(0);
+        return;
+      }
+    }
   } else if (replyStatus === 'discord_replied') {
     try { fs.unlinkSync(MISSED_REPLY_FLAG); } catch {}
+    try { fs.unlinkSync(REPLY_GUARD_MARKER); } catch {}
   }
 
   process.exit(0);

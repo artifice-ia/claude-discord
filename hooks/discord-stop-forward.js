@@ -3,7 +3,7 @@
 // Safety net for Discord-bridged bots: when a turn was triggered by a Discord
 // message but ended WITHOUT calling the reply tool, the agent's closing text
 // only reached the terminal — invisible to the user. This forwards that text
-// to the originating Discord channel so no response silently vanishes.
+// to the configured Discord channel after the reply guard has spent its retry.
 //
 // Fires on Stop. Does nothing (exit 0) when: the turn already called reply, the
 // trigger wasn't a Discord message, or there's no closing text. Never blocks.
@@ -11,10 +11,12 @@
 // Race note: Stop fires before the final text entry is flushed to the transcript.
 // We wait 300ms before reading so the write completes first.
 
-const { readFileSync } = require('fs')
+const { readFileSync, openSync, closeSync, writeSync } = require('fs')
+const { createHash } = require('crypto')
 const { request } = require('https')
 const { join } = require('path')
 const { homedir } = require('os')
+const { discordReplyState, isStopHookFeedback, isBusFrame } = require('./discord-reply-state')
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const personaPath = join(claudeDir, 'persona.md')
@@ -133,6 +135,13 @@ function stripPromptScaffolding(text) {
   return cleaned.replace(/\n{3,}/g, '\n\n').trim()
 }
 
+// One claim file per turn, under the bot's own name. The key holds a transcript path, so it
+// is hashed rather than embedded: a path contains separators and has no length bound.
+function claimFileFor(key) {
+  const bot = (persona && persona.name) || 'bot'
+  return `/tmp/${bot}-reply-guard-forwarded-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+}
+
 function isToolResult(content) {
   return Array.isArray(content) && content.length > 0 &&
     content.every(b => b && b.type === 'tool_result')
@@ -142,14 +151,17 @@ function hasReplyCall(content) {
   return Array.isArray(content) && content.some(b => b && b.type === 'tool_use' && b.name === REPLY_TOOL)
 }
 
+let persona = {}
 let raw = ''
 process.stdin.on('data', c => { raw += c })
 process.stdin.on('end', async () => {
   let payload = {}
   try { payload = JSON.parse(raw) } catch { process.exit(0) }
 
-  // We never block, so a re-prompt loop can't form — but bail anyway if flagged.
-  if (payload.stop_hook_active) process.exit(0)
+  // Stop handlers run in parallel: a marker alone cannot prove a retry.
+  if (process.env.DISCORD_REPLY_GUARD !== 'off' && payload.stop_hook_active !== true) process.exit(0)
+
+  // Re-prompted Stops are the fallback's opportunity to send. We never block.
 
   const transcriptPath = payload.transcript_path
   if (!transcriptPath) process.exit(0)
@@ -172,7 +184,8 @@ process.stdin.on('end', async () => {
   //   - turn ended on reply → covered, do nothing
   // Earlier text (pre-reply preamble, mid-turn narration) is intentionally
   // ignored — only the closing statement matters. This catches trailing text
-  // emitted AFTER a reply, which is the common slip.
+  // emitted AFTER a reply when the guard is disabled. With the guard enabled,
+  // any reply in this turn covers it and suppresses the fallback below.
   let leakedText = ''
   let decided = false
   let triggerContent = null
@@ -189,7 +202,14 @@ process.stdin.on('end', async () => {
         // thinking / tool_use(Bash) entries carry no text — keep walking
       }
     } else if (e.type === 'user') {
+      if (process.env.DISCORD_REPLY_GUARD !== 'off' && e.turnCompanion) continue
+      // Same reason as the shared scan: on a retry Stop this entry is the hook's own
+      // feedback, and treating it as the trigger loses the Discord marker.
+      if (process.env.DISCORD_REPLY_GUARD !== 'off' && isStopHookFeedback(e)) continue
       if (isToolResult(content)) continue
+      // SKIP BUS FRAMES. Bot-to-bot traffic is not a trigger and not a terminator.
+      // Breaking here would hide Fernando's genuine message underneath.
+      if (isBusFrame(e)) continue
       triggerContent = textOf(content)
       break
     }
@@ -204,8 +224,20 @@ process.stdin.on('end', async () => {
   leakedText = stripPromptScaffolding(leakedText)
   if (!leakedText) process.exit(0)
 
-  let persona = {}
+  persona = {}
   try { persona = readFrontmatter(readFileSync(personaPath, 'utf8')) } catch {}
+  let fallbackKey = null
+  if (process.env.DISCORD_REPLY_GUARD !== 'off') {
+    const { status, key } = discordReplyState(transcriptPath, entries)
+    if (status !== 'discord_no_reply') process.exit(0)
+    let prior = null
+    try {
+      prior = JSON.parse(readFileSync(`/tmp/${persona.name || 'bot'}-reply-guard-blocked.json`, 'utf8')).key
+    } catch {}
+    // First pass belongs to the guard; only its spent block authorizes fallback.
+    if (prior !== key) process.exit(0)
+    fallbackKey = key
+  }
   const chatMatch = triggerContent.match(/chat_id="(\d+)"/)
   // Always forward to the persona's configured channel, not the trigger
   // channel — trigger may be a fan-out channel.
@@ -226,6 +258,27 @@ process.stdin.on('end', async () => {
     rest = rest.slice(cut).replace(/^\n+/, '')
   }
   if (rest) chunks.push(rest)
+
+  if (fallbackKey) {
+    // Claim the turn BEFORE any network I/O: a crash mid-send must not duplicate delivery.
+    //
+    // The claim is an exclusive create of a per-turn file, not a lock file guarding a
+    // shared one. A lock would make a process killed while holding it fail every later
+    // Stop closed FOREVER, silently, which is worse than the duplicate it prevents:
+    // `openSync(lock, 'wx')` cannot tell a live holder from a corpse. An exclusive create
+    // keyed by the turn carries no such state — whoever creates it owns the send, and a
+    // leftover file means that turn was already claimed, which is exactly true.
+    let claimed = false
+    try {
+      const fd = openSync(claimFileFor(fallbackKey), 'wx')
+      // The exclusive create IS the claim; the body is for operators reading /tmp.
+      try { writeSync(fd, JSON.stringify({ key: fallbackKey, ts: Date.now() })) } finally { closeSync(fd) }
+      claimed = true
+    } catch {
+      claimed = false
+    }
+    if (!claimed) process.exit(0)
+  }
 
   function post(idx) {
     if (idx >= chunks.length) { process.exit(0); return }
