@@ -218,3 +218,35 @@ test('a claim left by an earlier turn does not suppress a different turn', () =>
   expect(run(forward, { transcript_path: second, stop_hook_active: true }).requests)
     .toEqual(['HTTPS /api/v10/channels/123/messages'])
 })
+
+// BUS-FRAME EXCLUSION. A fleet-bus frame carries BOTH source="plugin:artifice-discord:..."
+// AND source="fleet-bus". Both trigger scans previously matched on the plugin-source alone,
+// so every inbound bus message counted as an unanswered Discord message from Fernando:
+// the guard blocked the turn, and the forwarder leaked internal reasoning to his channel.
+// The fix: a Discord trigger must carry the plugin source AND NOT carry the fleet-bus source.
+// Fixture carries the real frame opening from a live bus exchange on 2026-10-18.
+
+test('bus frame: guard never blocks (not_discord verdict)', () => {
+  loadFixture('bus-frame')
+  // First pass: guard must not block — bus traffic is not Fernando
+  expect(run(guard).stdout).toBe('')
+})
+
+test('bus frame: forwarder never posts (no trigger on retry)', () => {
+  loadFixture('bus-frame')
+  // Even with stop_hook_active — must not POST to Fernando's channel
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests).toEqual([])
+})
+
+// Positive control: with the bus-frame exclusion in place, a genuine Discord frame
+// still blocks on first pass and still forwards on retry. The exclusion must not be
+// over-broad.
+test('genuine Discord frame still blocks and forwards (exclusion is not over-broad)', () => {
+  loadFixture('unanswered')
+  // First pass blocks
+  expect(JSON.parse(run(guard).stdout).decision).toBe('block')
+  // Retry forwards
+  loadFixture('retry-unanswered')
+  expect(run(forward, { transcript_path: session, stop_hook_active: true }).requests)
+    .toEqual(['HTTPS /api/v10/channels/123/messages'])
+})

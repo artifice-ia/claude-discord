@@ -47,7 +47,9 @@ function discordReplyState(sessionFile, entries) {
       ? content.filter(c => c.type === 'text').map(c => c.text).join('')
       : (typeof content === 'string' ? content : '');
 
-    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"')) {
+    // A fleet-bus frame carries BOTH the plugin source attribute and source="fleet-bus".
+    // Bot-to-bot traffic must not be mistaken for a human Discord trigger.
+    if (textParts.includes('source="plugin:artifice-discord:artifice-discord"') && !textParts.includes('source="fleet-bus"')) {
       lastDiscordIdx = i;
       break;
     } else {

@@ -24,6 +24,7 @@ const tokenFile = join(claudeDir, 'discord-token')
 
 const REPLY_TOOL = 'mcp__plugin_artifice-discord_artifice-discord__reply'
 const DISCORD_SOURCE = 'source="plugin:artifice-discord:artifice-discord"'
+const BUS_SOURCE = 'source="fleet-bus"'
 
 function readFrontmatter(content) {
   const match = content.match(/^---\n([\s\S]*?)\n---/)
@@ -213,7 +214,9 @@ process.stdin.on('end', async () => {
   }
 
   if (!leakedText) process.exit(0)
-  if (!triggerContent || !triggerContent.includes(DISCORD_SOURCE)) process.exit(0)
+  // A fleet-bus frame carries BOTH the plugin source and source="fleet-bus".
+  // Bot-to-bot traffic must not trigger forwarding to Fernando's channel.
+  if (!triggerContent || !triggerContent.includes(DISCORD_SOURCE) || triggerContent.includes(BUS_SOURCE)) process.exit(0)
 
   // Sanitize before forwarding: drop any echoed prompt-scaffolding tags
   // (Claude Code's `<system-reminder>` and this plugin's `<channel>` wrapper).
