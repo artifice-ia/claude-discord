@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.1
+
+- Audit manifest trust snapshots and reload changed allowlists without restarting the bus runtime.
+- Report manifest names, path, and loaded mtime in bus_status and rejected sender claims in audit logs.
+
 ## 0.11.0
 
 Five security reviews (Ohm, three rounds; Deet, two), five real leaks reproduced in
