@@ -409,6 +409,8 @@ export interface BusRuntimeConfig {
    * loop runs against a fake connection. Never set from production paths.
    */
   connectFn?: (options: ConnectionOptions) => Promise<NatsConnection>
+  /** Test-only: overrides the manifest refresh throttle. Pass 0 to disable. */
+  manifestCheckIntervalMs?: number
 }
 
 export class BusRuntime {
@@ -425,7 +427,7 @@ export class BusRuntime {
 
   constructor(config: BusRuntimeConfig) {
     this.config = config
-    this.allowlist = new FleetManifestAllowlist(config.manifestPath, config.auditLogPath, config.logger)
+    this.allowlist = new FleetManifestAllowlist(config.manifestPath, config.auditLogPath, config.logger, config.manifestCheckIntervalMs)
     this.rateLimiters = wrapRateLimiters(defaultRateLimiters())
 
     const fleetConfig: FleetBusConfig = {

@@ -146,6 +146,7 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     claudeBots: new Set<string>(),
     logger: () => {},
     injectIntoSession: async () => {},
+    manifestCheckIntervalMs: 0,
     ...overrides,
   }
 }
