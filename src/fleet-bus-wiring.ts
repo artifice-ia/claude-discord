@@ -22,6 +22,7 @@ import {
   escapeFrameIdentifier,
   FleetBus,
   loadFleetManifestAllowlist,
+  FleetManifestAllowlist,
   normalizeBotName,
   type FleetBusConfig,
   type FleetBusMode,
@@ -408,6 +409,8 @@ export interface BusRuntimeConfig {
    * loop runs against a fake connection. Never set from production paths.
    */
   connectFn?: (options: ConnectionOptions) => Promise<NatsConnection>
+  /** Test-only: overrides the manifest refresh throttle. Pass 0 to disable. */
+  manifestCheckIntervalMs?: number
 }
 
 export class BusRuntime {
@@ -420,11 +423,11 @@ export class BusRuntime {
   injectionsFailed = 0
   lastInjectionTs?: string
   lastError?: string
-  private readonly allowlist: ReadonlySet<string>
+  private readonly allowlist: FleetManifestAllowlist
 
   constructor(config: BusRuntimeConfig) {
     this.config = config
-    this.allowlist = loadFleetManifestAllowlist(config.manifestPath)
+    this.allowlist = new FleetManifestAllowlist(config.manifestPath, config.auditLogPath, config.logger, config.manifestCheckIntervalMs)
     this.rateLimiters = wrapRateLimiters(defaultRateLimiters())
 
     const fleetConfig: FleetBusConfig = {
@@ -505,12 +508,16 @@ export class BusRuntime {
   }
 
   statusSnapshot(): Record<string, unknown> {
+    this.allowlist.refresh()
     return {
       state: this.state,
       bot_name: this.config.botName,
       mode: this.config.mode,
       url: this.config.url,
       manifest_size: this.allowlist.size,
+      manifest_names: [...this.allowlist].sort(),
+      manifest_path: this.allowlist.manifestPath,
+      manifest_mtime_ms: this.allowlist.loadedMtimeMs,
       subscribe_broadcast: this.config.subscribeBroadcast,
       heartbeat_interval_ms: this.config.heartbeatIntervalMs ?? 30_000,
       supervisor_sleep_ms: this.config.supervisorSleepMs ?? 2_000,

@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { JSONCodec, type Msg, type NatsConnection } from 'nats'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BusRuntime, DurableEnvelopeDedupStore, type BusRuntimeConfig } from './fleet-bus-wiring'
@@ -146,6 +146,7 @@ function makeConfig(overrides: Partial<BusRuntimeConfig>, manifestPath: string, 
     claudeBots: new Set<string>(),
     logger: () => {},
     injectIntoSession: async () => {},
+    manifestCheckIntervalMs: 0,
     ...overrides,
   }
 }
@@ -389,4 +390,27 @@ describe('BusRuntime supervisor + wiring (cold-boot runtime smoke)', () => {
     expect(nc.publishes.filter(p => p.subject.endsWith('.status'))).toEqual([])
     await runtime.stop()
   })
+})
+
+test('status reports audited manifest additions and removals without reconstructing runtime', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runtime-manifest-'))
+  const manifestPath = join(dir, 'manifest.yaml')
+  const auditLogPath = join(dir, 'audit.jsonl')
+  writeManifest(manifestPath, ['luna'])
+  utimesSync(manifestPath, 1000, 1000)
+  const runtime = new BusRuntime(makeConfig({}, manifestPath, auditLogPath))
+  expect(runtime.statusSnapshot().manifest_names).toEqual(['luna'])
+  writeManifest(manifestPath, ['luna', 'ion'])
+  utimesSync(manifestPath, 1001, 1001)
+  expect(runtime.statusSnapshot().manifest_names).toEqual(['ion', 'luna'])
+  writeManifest(manifestPath, ['luna'])
+  utimesSync(manifestPath, 1002, 1002)
+  expect(runtime.statusSnapshot()).toMatchObject({ manifest_names: ['luna'], manifest_size: 1,
+    manifest_path: manifestPath, manifest_mtime_ms: 1002000 })
+  writeFileSync(manifestPath, 'bot_names: [')
+  utimesSync(manifestPath, 1003, 1003)
+  expect(runtime.statusSnapshot().manifest_names).toEqual(['luna'])
+  const audit = readFileSync(auditLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  expect(audit.filter(e => e.reason === 'fleet_manifest_loaded')).toHaveLength(3)
+  expect(audit.filter(e => e.reason === 'fleet_manifest_reload_failed')).toHaveLength(1)
 })
